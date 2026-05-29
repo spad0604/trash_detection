@@ -131,7 +131,7 @@ class DashboardView extends GetView<DashboardController> {
             children: [
               Expanded(
                 child: _BinDetailCard(
-                  label: 'Nhựa / Lon',
+                  label: 'Kim loại',
                   index: 1,
                   percent: bin.bin1Percent,
                   temperature: bin.temperature1,
@@ -140,13 +140,13 @@ class DashboardView extends GetView<DashboardController> {
                   mq135: bin.mq135_1,
                   isFull: bin.bin1Full,
                   color: AppColors.binPlastic,
-                  icon: Icons.local_drink_outlined,
+                  icon: Icons.hardware_outlined,
                 ),
               ),
               const SizedBox(width: 14),
               Expanded(
                 child: _BinDetailCard(
-                  label: 'Hữu cơ',
+                  label: 'Giấy',
                   index: 2,
                   percent: bin.bin2Percent,
                   temperature: bin.temperature2,
@@ -155,7 +155,7 @@ class DashboardView extends GetView<DashboardController> {
                   mq135: bin.mq135_2,
                   isFull: bin.bin2Full,
                   color: AppColors.binOrganic,
-                  icon: Icons.eco_outlined,
+                  icon: Icons.description_outlined,
                 ),
               ),
               const SizedBox(width: 14),
@@ -190,7 +190,7 @@ class DashboardView extends GetView<DashboardController> {
       delegate: SliverChildListDelegate([
         _sectionLabel('Tình trạng từng ngăn rác'),
         _BinDetailCard(
-          label: 'Nhựa / Lon',
+          label: 'Kim loại',
           index: 1,
           percent: bin.bin1Percent,
           temperature: bin.temperature1,
@@ -199,11 +199,11 @@ class DashboardView extends GetView<DashboardController> {
           mq135: bin.mq135_1,
           isFull: bin.bin1Full,
           color: AppColors.binPlastic,
-          icon: Icons.local_drink_outlined,
+          icon: Icons.hardware_outlined,
         ),
         const SizedBox(height: 14),
         _BinDetailCard(
-          label: 'Hữu cơ',
+          label: 'Giấy',
           index: 2,
           percent: bin.bin2Percent,
           temperature: bin.temperature2,
@@ -212,7 +212,7 @@ class DashboardView extends GetView<DashboardController> {
           mq135: bin.mq135_2,
           isFull: bin.bin2Full,
           color: AppColors.binOrganic,
-          icon: Icons.eco_outlined,
+          icon: Icons.description_outlined,
         ),
         const SizedBox(height: 14),
         _BinDetailCard(
@@ -251,8 +251,11 @@ class DashboardView extends GetView<DashboardController> {
         children: [
           Row(
             children: [
-              const Icon(Icons.info_outline_rounded,
-                  size: 17, color: AppColors.textSecondary),
+              const Icon(
+                Icons.info_outline_rounded,
+                size: 17,
+                color: AppColors.textSecondary,
+              ),
               const SizedBox(width: 8),
               Text(
                 'Thông tin hệ thống',
@@ -299,6 +302,66 @@ class DashboardView extends GetView<DashboardController> {
               ),
             ],
           ),
+          const SizedBox(height: 18),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: bin.isDumping || bin.goDumpRequested
+                      ? null
+                      : controller.requestGoDump,
+                  icon: const Icon(Icons.local_shipping_outlined, size: 18),
+                  label: Text(
+                    bin.isDumping || bin.goDumpRequested
+                        ? 'Đang đi'
+                        : 'Đi đổ rác',
+                    style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.warning,
+                    foregroundColor: Colors.black,
+                    disabledBackgroundColor: AppColors.surfaceAlt,
+                    disabledForegroundColor: AppColors.textMuted,
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: bin.isWaitingAtDump && !bin.goHomeRequested
+                      ? controller.requestGoHome
+                      : null,
+                  icon: const Icon(Icons.home_outlined, size: 18),
+                  label: Text(
+                    bin.goHomeRequested || bin.state == 'dump_returning'
+                        ? 'Đang về'
+                        : 'Về nhà',
+                    style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.info,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: AppColors.surfaceAlt,
+                    disabledForegroundColor: AppColors.textMuted,
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -334,8 +397,11 @@ class DashboardView extends GetView<DashboardController> {
               color: AppColors.surfaceAlt,
               borderRadius: BorderRadius.circular(20),
             ),
-            child: const Icon(Icons.wifi_off_rounded,
-                size: 40, color: AppColors.textMuted),
+            child: const Icon(
+              Icons.wifi_off_rounded,
+              size: 40,
+              color: AppColors.textMuted,
+            ),
           ),
           const SizedBox(height: 20),
           Text(
@@ -446,7 +512,9 @@ class _BinDetailCard extends StatelessWidget {
               if (isFull)
                 Container(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 3),
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
                   decoration: BoxDecoration(
                     color: AppColors.danger.withOpacity(0.12),
                     borderRadius: BorderRadius.circular(6),
@@ -508,7 +576,9 @@ class _BinDetailCard extends StatelessWidget {
             icon: Icons.thermostat_outlined,
             label: 'Nhiệt độ',
             value: '${temperature.toStringAsFixed(1)} °C',
-            color: temperature > 50 ? AppColors.danger : AppColors.textSecondary,
+            color: temperature > 50
+                ? AppColors.danger
+                : AppColors.textSecondary,
           ),
           const SizedBox(height: 10),
           _SensorRow(

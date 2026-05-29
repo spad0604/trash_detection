@@ -8,50 +8,56 @@ class AlertBanner extends StatelessWidget {
   final TrashBinModel bin;
   final VoidCallback onDismiss;
 
-  const AlertBanner({
-    super.key,
-    required this.bin,
-    required this.onDismiss,
-  });
+  const AlertBanner({super.key, required this.bin, required this.onDismiss});
 
   @override
   Widget build(BuildContext context) {
     final alerts = <_AlertItem>[];
 
     if (bin.fireRisk) {
-      alerts.add(_AlertItem(
-        icon: Icons.local_fire_department_rounded,
-        text: 'Phát hiện nguy cơ CHÁY NỔ!',
-        color: AppColors.danger,
-      ));
+      alerts.add(
+        _AlertItem(
+          icon: Icons.local_fire_department_rounded,
+          text: 'Phát hiện nguy cơ CHÁY NỔ!',
+          color: AppColors.danger,
+        ),
+      );
     }
     if (bin.gasLeak) {
-      alerts.add(_AlertItem(
-        icon: Icons.air_rounded,
-        text: 'Phát hiện rò rỉ khí gas!',
-        color: AppColors.warning,
-      ));
+      alerts.add(
+        _AlertItem(
+          icon: Icons.air_rounded,
+          text: 'Phát hiện rò rỉ khí gas!',
+          color: AppColors.warning,
+        ),
+      );
     }
     if (bin.bin1Full) {
-      alerts.add(_AlertItem(
-        icon: Icons.delete_rounded,
-        text: 'Ngăn Nhựa/Lon đã đầy!',
-        color: AppColors.binPlastic,
-      ));
+      alerts.add(
+        _AlertItem(
+          icon: Icons.delete_rounded,
+          text: 'Ngăn Kim loại đã đầy!',
+          color: AppColors.binPlastic,
+        ),
+      );
     }
     if (bin.bin2Full) {
-      alerts.add(_AlertItem(
-        icon: Icons.delete_rounded,
-        text: 'Ngăn Hữu cơ đã đầy!',
-        color: AppColors.binOrganic,
-      ));
+      alerts.add(
+        _AlertItem(
+          icon: Icons.delete_rounded,
+          text: 'Ngăn Giấy đã đầy!',
+          color: AppColors.binOrganic,
+        ),
+      );
     }
     if (bin.bin3Full) {
-      alerts.add(_AlertItem(
-        icon: Icons.delete_rounded,
-        text: 'Ngăn Khác đã đầy!',
-        color: AppColors.binOther,
-      ));
+      alerts.add(
+        _AlertItem(
+          icon: Icons.delete_rounded,
+          text: 'Ngăn Khác đã đầy!',
+          color: AppColors.binOther,
+        ),
+      );
     }
 
     if (alerts.isEmpty) return const SizedBox.shrink();
@@ -62,18 +68,18 @@ class AlertBanner extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.danger.withOpacity(0.08),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: AppColors.danger.withOpacity(0.3),
-          width: 1,
-        ),
+        border: Border.all(color: AppColors.danger.withOpacity(0.3), width: 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.warning_rounded,
-                  size: 18, color: AppColors.danger),
+              const Icon(
+                Icons.warning_rounded,
+                size: 18,
+                color: AppColors.danger,
+              ),
               const SizedBox(width: 8),
               Text(
                 'CẢNH BÁO KHẨN CẤP',
@@ -90,7 +96,9 @@ class AlertBanner extends StatelessWidget {
                 borderRadius: BorderRadius.circular(8),
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 4),
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
                   decoration: BoxDecoration(
                     color: AppColors.danger.withOpacity(0.15),
                     borderRadius: BorderRadius.circular(8),
@@ -108,25 +116,27 @@ class AlertBanner extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          ...alerts.map((a) => Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Row(
-                  children: [
-                    Icon(a.icon, size: 16, color: a.color),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        a.text,
-                        style: GoogleFonts.inter(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                          color: AppColors.textPrimary,
-                        ),
+          ...alerts.map(
+            (a) => Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                children: [
+                  Icon(a.icon, size: 16, color: a.color),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      a.text,
+                      style: GoogleFonts.inter(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: AppColors.textPrimary,
                       ),
                     ),
-                  ],
-                ),
-              )),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -138,9 +148,5 @@ class _AlertItem {
   final String text;
   final Color color;
 
-  _AlertItem({
-    required this.icon,
-    required this.text,
-    required this.color,
-  });
+  _AlertItem({required this.icon, required this.text, required this.color});
 }

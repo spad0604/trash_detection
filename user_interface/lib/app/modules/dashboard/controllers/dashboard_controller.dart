@@ -1,4 +1,5 @@
 import 'package:get/get.dart';
+import 'package:flutter/foundation.dart';
 import '../../../data/models/trash_bin_model.dart';
 import '../../../data/repositories/trash_bin_repository.dart';
 
@@ -18,13 +19,18 @@ class DashboardController extends GetxController {
   }
 
   void _listenToBin(String binId) {
-    _repository.streamBin(binId).listen((bin) {
-      currentBin.value = bin;
-      isLoading.value = false;
-    }, onError: (e) {
-      print('[Dashboard] Stream error: $e');
-      isLoading.value = false;
-    });
+    _repository
+        .streamBin(binId)
+        .listen(
+          (bin) {
+            currentBin.value = bin;
+            isLoading.value = false;
+          },
+          onError: (e) {
+            print('[Dashboard] Stream error: $e');
+            isLoading.value = false;
+          },
+        );
   }
 
   void _listenToAllBins() {
@@ -47,17 +53,62 @@ class DashboardController extends GetxController {
     await _repository.clearAllAlerts(selectedBinId.value);
   }
 
+  Future<void> requestGoDump() async {
+    try {
+      debugPrint(
+        '[DashboardController] requestGoDump selectedBinId=${selectedBinId.value}',
+      );
+      await _repository.requestGoDump(selectedBinId.value);
+      Get.snackbar('Command', 'Da gui lenh di do rac');
+    } catch (e) {
+      debugPrint('[DashboardController] requestGoDump error: $e');
+      Get.snackbar('Firebase error', e.toString());
+      rethrow;
+    }
+  }
+
+  Future<void> requestGoHome() async {
+    try {
+      debugPrint(
+        '[DashboardController] requestGoHome selectedBinId=${selectedBinId.value}',
+      );
+      await _repository.requestGoHome(selectedBinId.value);
+      Get.snackbar('Command', 'Da gui lenh ve nha');
+    } catch (e) {
+      debugPrint('[DashboardController] requestGoHome error: $e');
+      Get.snackbar('Firebase error', e.toString());
+      rethrow;
+    }
+  }
+
   // ── Computed getters for UI ─────────────────────────────
   String get statusText {
     final bin = currentBin.value;
     if (bin == null) return 'Offline';
     switch (bin.state) {
-      case 'idle':       return 'Sẵn sàng';
-      case 'processing': return 'Đang xử lý';
-      case 'sorting':    return 'Đang phân loại';
-      case 'moving':     return 'Đang di chuyển';
-      case 'alert':      return 'Cảnh báo!';
-      default:           return 'Offline';
+      case 'idle':
+        return 'Sẵn sàng';
+      case 'processing':
+        return 'Đang xử lý';
+      case 'sorting':
+        return 'Đang phân loại';
+      case 'moving':
+      case 'dump_outbound':
+        return 'Đang đi đổ rác';
+      case 'dump_requested':
+        return 'Đã yêu cầu đổ rác';
+      case 'awaiting_return':
+        return 'Đang chờ lệnh về nhà';
+      case 'home_requested':
+        return 'Đã yêu cầu về nhà';
+      case 'dump_returning':
+        return 'Đang quay về';
+      case 'line_lost':
+        return 'Mất line';
+      case 'alert':
+        return 'Cảnh báo!';
+      default:
+        return 'Offline';
     }
   }
 

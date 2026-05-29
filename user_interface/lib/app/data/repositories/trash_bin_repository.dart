@@ -1,4 +1,5 @@
 import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart';
 import '../models/trash_bin_model.dart';
 
 class TrashBinRepository {
@@ -41,9 +42,30 @@ class TrashBinRepository {
     });
   }
 
+  /// Request robot to follow line to the dump station.
+  Future<void> requestGoDump(String binId) async {
+    debugPrint('[TrashBinRepository] requestGoDump binId=$binId');
+    await _dbRef.child('bins/$binId/commands/go_dump').set(true);
+    await _dbRef
+        .child('bins/$binId/commands/requested_at')
+        .set(ServerValue.timestamp);
+  }
+
+  /// Request robot to rotate 180 degrees and follow the line home.
+  Future<void> requestGoHome(String binId) async {
+    debugPrint('[TrashBinRepository] requestGoHome binId=$binId');
+    await _dbRef.child('bins/$binId/commands/go_home').set(true);
+    await _dbRef
+        .child('bins/$binId/commands/requested_at')
+        .set(ServerValue.timestamp);
+  }
+
   /// Update bin location (from GPS module)
   Future<void> updateLocation(
-      String binId, double latitude, double longitude) async {
+    String binId,
+    double latitude,
+    double longitude,
+  ) async {
     await _dbRef.child('bins/$binId/location').update({
       'latitude': latitude,
       'longitude': longitude,

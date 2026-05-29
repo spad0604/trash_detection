@@ -1,391 +1,307 @@
 /*
- * ============================================================
- *  ESP32 #1 — Sensor & Power Management Node
- *  Project : Smart Trash Bin — Edge AI & IoT Cloud
- * ============================================================
- *  Responsibilities:
- *    • Read 3x DHT22   (temperature & humidity)
- *    • Read 3x MQ-2    (smoke / flammable gas)
- *    • Read 3x MQ-135  (air quality / odour)
- *    • Read 3x HC-SR04 (bin fill-level %)
- *    • Read battery voltage via voltage divider
- *    • Send data to Raspberry Pi over UART (Serial2)
- *    • Push data to Firebase Realtime Database over WiFi
- *  
- *  UART Protocol  (ESP32 #1 ↔ Pi):
- *    ESP→Pi:  "SENSOR:<t1>,<h1>,<t2>,<h2>,<t3>,<h3>,<mq2_1>,<mq2_2>,<mq2_3>,<mq135_1>,<mq135_2>,<mq135_3>,<lvl1>,<lvl2>,<lvl3>,<vbat>\n"
- *    ESP→Pi:  "ALERT:FIRE\n"   — sudden temp rise or smoke
- *    ESP→Pi:  "ALERT:GAS\n"    — hazardous gas detected
- *    Pi→ESP:  "CMD:READ_SENSORS\n"   — force immediate read
- *    Pi→ESP:  "CMD:READ_LEVELS\n"    — force level read
- * ============================================================
+ * ESP32 #1 - Sensor Node
+ * Project: Smart Trash Bin
+ *
+ * Responsibilities:
+ *   - Read 3x DHT22, 3x MQ-2, 3x MQ-135
+ *   - Read 3x HC-SR04 bin fill sensors
+ *   - Read battery voltage
+ *   - Read IR object sensor
+ *   - Send all data to Raspberry Pi over USB serial through the Type-C cable
+ *
+ * Pi is responsible for ROS orchestration and Firebase upload.
+ *
+ * USB serial protocol, ESP32 -> Pi:
+ *   SENSOR:<t1>,<h1>,<t2>,<h2>,<t3>,<h3>,<mq2_1>,<mq2_2>,<mq2_3>,<mq135_1>,<mq135_2>,<mq135_3>,<lvl1>,<lvl2>,<lvl3>,<vbat>,<ir_state>
+ *   LEVELS:<l1>,<l2>,<l3>
+ *   BATTERY:<vbat>
+ *   IR:<0|1>
+ *   ALERT:FIRE
+ *   ALERT:GAS
+ *
+ * USB serial protocol, Pi -> ESP32:
+ *   CMD:READ_SENSORS
+ *   CMD:READ_LEVELS
+ *   CMD:READ_BATTERY
+ *   CMD:READ_IR
  */
 
-#include <WiFi.h>
-#include <Firebase_ESP_Client.h>
 #include <DHT.h>
 
-// ── Provide token-generation helpers ────────────────────────
-#include <addons/TokenHelper.h>
-#include <addons/RTDBHelper.h>
+// Pinout copied from code_test/esp32_sensor_readout.
+static const int DHT1_PIN = 5;
+static const int DHT2_PIN = 18;
+static const int DHT3_PIN = 19;
+static const int DHT_TYPE = DHT22;
 
-// ════════════════════════════════════════════════════════════
-//  WiFi & Firebase credentials
-// ════════════════════════════════════════════════════════════
-#define WIFI_SSID       "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD   "YOUR_WIFI_PASSWORD"
+static const int IR_PIN = 4;
 
-#define FIREBASE_HOST   "trash-detection-9d793-default-rtdb.firebaseio.com"
-#define FIREBASE_API_KEY "YOUR_FIREBASE_API_KEY"
-#define BIN_ID          "bin_001"
+static const int MQ2_1_PIN = 32;
+static const int MQ2_2_PIN = 33;
+static const int MQ2_3_PIN = 25;
 
-// ════════════════════════════════════════════════════════════
-//  Pin Definitions  —  ESP32 #1 (Sensor Node)
-// ════════════════════════════════════════════════════════════
+static const int MQ135_1_PIN = 36;  // VP
+static const int MQ135_2_PIN = 39;  // VN
+static const int MQ135_3_PIN = 34;
 
-// HC-SR04 Ultrasonic  (3 bins)
-#define TRIG1  12
-#define ECHO1  13
-#define TRIG2  26
-#define ECHO2  27
-#define TRIG3   2
-#define ECHO3  15
+static const int US1_TRIG_PIN = 13;
+static const int US1_ECHO_PIN = 14;
+static const int US2_TRIG_PIN = 27;
+static const int US2_ECHO_PIN = 26;
+static const int US3_TRIG_PIN = 15;
+static const int US3_ECHO_PIN = 2;
 
-// DHT22 Temperature & Humidity  (3 sensors)
-#define DHT1_PIN  4
-#define DHT2_PIN 14
-#define DHT3_PIN 18
-#define DHT_TYPE DHT22
+static const int VBAT_PIN = 35;
+static const float VBAT_R1 = 10000.0f;
+static const float VBAT_R2 = 3000.0f;
 
-// MQ-2 Smoke / Gas  (Analog)
-#define MQ2_1_PIN 32
-#define MQ2_2_PIN 33
-#define MQ2_3_PIN 25
+static const uint32_t USB_SERIAL_BAUD = 115200;
+#define PI_SERIAL Serial
 
-// MQ-135 Air Quality  (Analog)
-#define MQ135_1_PIN 36   // VP
-#define MQ135_2_PIN 39   // VN
-#define MQ135_3_PIN 35
+static const float TEMP_FIRE_THRESHOLD = 60.0f;
+static const int MQ2_SMOKE_THRESHOLD = 800;
+static const int MQ135_GAS_THRESHOLD = 700;
+static const float BIN_HEIGHT_CM = 40.0f;
 
-// Battery voltage  (Analog — through voltage divider)
-#define VBAT_PIN 34
+static const unsigned long SENSOR_INTERVAL_MS = 3000;
+static const unsigned long IR_POLL_INTERVAL_MS = 50;
+static const unsigned long ALERT_INTERVAL_MS = 5000;
 
-// UART to Raspberry Pi  (Serial2)
-#define UART_RX2 16
-#define UART_TX2 17
-
-// ════════════════════════════════════════════════════════════
-//  Thresholds  (tweak for your environment)
-// ════════════════════════════════════════════════════════════
-#define TEMP_FIRE_THRESHOLD   60.0   // °C
-#define MQ2_SMOKE_THRESHOLD   800    // ADC raw (0-4095)
-#define MQ135_GAS_THRESHOLD   700    // ADC raw (0-4095)
-#define BIN_HEIGHT_CM         40.0   // physical bin depth in cm
-#define SENSOR_INTERVAL_MS    3000   // read every 3 s
-#define FIREBASE_INTERVAL_MS  5000   // push every 5 s
-
-// ════════════════════════════════════════════════════════════
-//  Objects
-// ════════════════════════════════════════════════════════════
 DHT dht1(DHT1_PIN, DHT_TYPE);
 DHT dht2(DHT2_PIN, DHT_TYPE);
 DHT dht3(DHT3_PIN, DHT_TYPE);
 
-FirebaseData   fbdo;
-FirebaseAuth   auth;
-FirebaseConfig config;
-
-// ════════════════════════════════════════════════════════════
-//  Sensor data struct
-// ════════════════════════════════════════════════════════════
 struct SensorData {
   float temp[3];
   float hum[3];
-  int   mq2[3];
-  int   mq135[3];
-  int   level[3];      // fill percentage 0-100
-  float vbat;           // battery voltage
+  int mq2[3];
+  int mq135[3];
+  int level[3];
+  float vbat;
+  int irState;
 };
 
 SensorData sensorData;
 
-// Timing
-unsigned long lastSensorRead   = 0;
-unsigned long lastFirebasePush = 0;
-bool firebaseReady = false;
+unsigned long lastSensorRead = 0;
+unsigned long lastIrPoll = 0;
+unsigned long lastFireAlert = 0;
+unsigned long lastGasAlert = 0;
+int lastSentIrState = -1;
 
-// ════════════════════════════════════════════════════════════
-//  SETUP
-// ════════════════════════════════════════════════════════════
+void setupUltrasonicPin(int trigPin, int echoPin) {
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  digitalWrite(trigPin, LOW);
+}
+
+void setupAnalogPin(int pin) {
+  pinMode(pin, INPUT);
+  analogSetPinAttenuation(pin, ADC_11db);
+}
+
 void setup() {
-  Serial.begin(115200);
-  Serial2.begin(9600, SERIAL_8N1, UART_RX2, UART_TX2);
+  PI_SERIAL.begin(USB_SERIAL_BAUD);
+  PI_SERIAL.setTimeout(20);
+  delay(300);
 
-  // ── Ultrasonic pins ───────────────────────────────────────
-  pinMode(TRIG1, OUTPUT); pinMode(ECHO1, INPUT);
-  pinMode(TRIG2, OUTPUT); pinMode(ECHO2, INPUT);
-  pinMode(TRIG3, OUTPUT); pinMode(ECHO3, INPUT);
-
-  // ── DHT sensors ───────────────────────────────────────────
   dht1.begin();
   dht2.begin();
   dht3.begin();
 
-  // ── Analog inputs (MQ / VBAT) ─────────────────────────────
-  analogReadResolution(12);   // 0-4095
-  analogSetAttenuation(ADC_11db);
+  pinMode(IR_PIN, INPUT);
 
-  // ── WiFi ──────────────────────────────────────────────────
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("[WiFi] Connecting");
-  unsigned long wifiStart = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
-    delay(400);
-    Serial.print(".");
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\n[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
-  } else {
-    Serial.println("\n[WiFi] FAILED — running in offline mode");
-  }
+  analogReadResolution(12);
+  setupAnalogPin(MQ2_1_PIN);
+  setupAnalogPin(MQ2_2_PIN);
+  setupAnalogPin(MQ2_3_PIN);
+  setupAnalogPin(MQ135_1_PIN);
+  setupAnalogPin(MQ135_2_PIN);
+  setupAnalogPin(MQ135_3_PIN);
+  setupAnalogPin(VBAT_PIN);
 
-  // ── Firebase ──────────────────────────────────────────────
-  config.api_key      = FIREBASE_API_KEY;
-  config.database_url = FIREBASE_HOST;
-  config.token_status_callback = tokenStatusCallback;
-  Firebase.begin(&config, &auth);
-  Firebase.reconnectNetwork(true);
-  fbdo.setBSSLBufferSize(4096, 1024);
-  firebaseReady = true;
+  setupUltrasonicPin(US1_TRIG_PIN, US1_ECHO_PIN);
+  setupUltrasonicPin(US2_TRIG_PIN, US2_ECHO_PIN);
+  setupUltrasonicPin(US3_TRIG_PIN, US3_ECHO_PIN);
 
-  Serial.println("[ESP32 #1] Sensor Node — Ready");
+  sensorData.irState = digitalRead(IR_PIN);
+  sendIrToPi(true);
+
+  PI_SERIAL.println("STATUS:SENSOR_READY");
 }
 
-// ════════════════════════════════════════════════════════════
-//  LOOP
-// ════════════════════════════════════════════════════════════
 void loop() {
-  // ── Handle commands from Pi ───────────────────────────────
   handlePiCommands();
+  pollIr();
 
-  // ── Periodic sensor read ──────────────────────────────────
-  if (millis() - lastSensorRead >= SENSOR_INTERVAL_MS) {
-    lastSensorRead = millis();
+  unsigned long now = millis();
+  if (now - lastSensorRead >= SENSOR_INTERVAL_MS) {
+    lastSensorRead = now;
     readAllSensors();
     checkAlerts();
     sendSensorDataToPi();
   }
-
-  // ── Periodic Firebase push ────────────────────────────────
-  if (firebaseReady && Firebase.ready() &&
-      millis() - lastFirebasePush >= FIREBASE_INTERVAL_MS) {
-    lastFirebasePush = millis();
-    pushToFirebase();
-  }
 }
 
-// ════════════════════════════════════════════════════════════
-//  Ultrasonic helper — returns distance in cm
-// ════════════════════════════════════════════════════════════
-float readUltrasonic(uint8_t trigPin, uint8_t echoPin) {
+float readUltrasonicCm(int trigPin, int echoPin) {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
 
-  long duration = pulseIn(echoPin, HIGH, 30000);  // 30 ms timeout
-  if (duration == 0) return BIN_HEIGHT_CM;         // no echo → assume empty
-  return (duration * 0.034) / 2.0;
-}
-
-// ════════════════════════════════════════════════════════════
-//  Calculate fill percentage
-// ════════════════════════════════════════════════════════════
-int calcFillPercent(float distanceCm) {
-  float fill = ((BIN_HEIGHT_CM - distanceCm) / BIN_HEIGHT_CM) * 100.0;
-  if (fill < 0)   fill = 0;
-  if (fill > 100)  fill = 100;
-  return (int)fill;
-}
-
-// ════════════════════════════════════════════════════════════
-//  Read all sensors
-// ════════════════════════════════════════════════════════════
-void readAllSensors() {
-  // DHT22
-  sensorData.temp[0] = dht1.readTemperature();
-  sensorData.hum[0]  = dht1.readHumidity();
-  sensorData.temp[1] = dht2.readTemperature();
-  sensorData.hum[1]  = dht2.readHumidity();
-  sensorData.temp[2] = dht3.readTemperature();
-  sensorData.hum[2]  = dht3.readHumidity();
-
-  // Replace NaN with -1 (sensor error)
-  for (int i = 0; i < 3; i++) {
-    if (isnan(sensorData.temp[i])) sensorData.temp[i] = -1;
-    if (isnan(sensorData.hum[i]))  sensorData.hum[i]  = -1;
+  unsigned long duration = pulseIn(echoPin, HIGH, 30000UL);
+  if (duration == 0) {
+    return BIN_HEIGHT_CM;
   }
+  return duration * 0.0343f / 2.0f;
+}
 
-  // MQ-2
+int calcFillPercent(float distanceCm) {
+  if (distanceCm < 0) {
+    return 0;
+  }
+  float fill = ((BIN_HEIGHT_CM - distanceCm) / BIN_HEIGHT_CM) * 100.0f;
+  if (fill < 0) fill = 0;
+  if (fill > 100) fill = 100;
+  return (int)(fill + 0.5f);
+}
+
+float readBatteryVoltage() {
+  int mv = analogReadMilliVolts(VBAT_PIN);
+  return (mv / 1000.0f) * ((VBAT_R1 + VBAT_R2) / VBAT_R2);
+}
+
+float cleanDhtValue(float value) {
+  return isnan(value) ? -1.0f : value;
+}
+
+void readAllSensors() {
+  sensorData.temp[0] = cleanDhtValue(dht1.readTemperature());
+  sensorData.hum[0] = cleanDhtValue(dht1.readHumidity());
+  sensorData.temp[1] = cleanDhtValue(dht2.readTemperature());
+  sensorData.hum[1] = cleanDhtValue(dht2.readHumidity());
+  sensorData.temp[2] = cleanDhtValue(dht3.readTemperature());
+  sensorData.hum[2] = cleanDhtValue(dht3.readHumidity());
+
   sensorData.mq2[0] = analogRead(MQ2_1_PIN);
   sensorData.mq2[1] = analogRead(MQ2_2_PIN);
   sensorData.mq2[2] = analogRead(MQ2_3_PIN);
 
-  // MQ-135
   sensorData.mq135[0] = analogRead(MQ135_1_PIN);
   sensorData.mq135[1] = analogRead(MQ135_2_PIN);
   sensorData.mq135[2] = analogRead(MQ135_3_PIN);
 
-  // Ultrasonic fill level
-  float d1 = readUltrasonic(TRIG1, ECHO1);
-  float d2 = readUltrasonic(TRIG2, ECHO2);
-  float d3 = readUltrasonic(TRIG3, ECHO3);
-  sensorData.level[0] = calcFillPercent(d1);
-  sensorData.level[1] = calcFillPercent(d2);
-  sensorData.level[2] = calcFillPercent(d3);
+  sensorData.level[0] = calcFillPercent(readUltrasonicCm(US1_TRIG_PIN, US1_ECHO_PIN));
+  sensorData.level[1] = calcFillPercent(readUltrasonicCm(US2_TRIG_PIN, US2_ECHO_PIN));
+  sensorData.level[2] = calcFillPercent(readUltrasonicCm(US3_TRIG_PIN, US3_ECHO_PIN));
 
-  // Battery voltage  (voltage divider: R1=30k, R2=10k → factor 4)
-  int rawAdc = analogRead(VBAT_PIN);
-  sensorData.vbat = (rawAdc / 4095.0) * 3.3 * 4.0;   // scale to real voltage
+  sensorData.vbat = readBatteryVoltage();
+  sensorData.irState = digitalRead(IR_PIN);
 
-  Serial.printf("[Sensor] T: %.1f/%.1f/%.1f  H: %.1f/%.1f/%.1f  Levels: %d%%/%d%%/%d%%  VBAT: %.1fV\n",
-    sensorData.temp[0], sensorData.temp[1], sensorData.temp[2],
-    sensorData.hum[0],  sensorData.hum[1],  sensorData.hum[2],
-    sensorData.level[0], sensorData.level[1], sensorData.level[2],
-    sensorData.vbat);
 }
 
-// ════════════════════════════════════════════════════════════
-//  Alert check — fire / gas
-// ════════════════════════════════════════════════════════════
+void pollIr() {
+  unsigned long now = millis();
+  if (now - lastIrPoll < IR_POLL_INTERVAL_MS) {
+    return;
+  }
+  lastIrPoll = now;
+  sensorData.irState = digitalRead(IR_PIN);
+  sendIrToPi(false);
+}
+
+void sendIrToPi(bool force) {
+  if (!force && sensorData.irState == lastSentIrState) {
+    return;
+  }
+  lastSentIrState = sensorData.irState;
+
+  char buf[16];
+  snprintf(buf, sizeof(buf), "IR:%d", sensorData.irState);
+  PI_SERIAL.println(buf);
+}
+
 void checkAlerts() {
-  // Fire risk: high temp OR smoke
-  for (int i = 0; i < 3; i++) {
-    if (sensorData.temp[i] > TEMP_FIRE_THRESHOLD ||
-        sensorData.mq2[i]  > MQ2_SMOKE_THRESHOLD) {
-      Serial2.println("ALERT:FIRE");
-      Serial.println("[ALERT] FIRE risk detected!");
+  unsigned long now = millis();
 
-      // Also push alert to Firebase immediately
-      if (firebaseReady && Firebase.ready()) {
-        String path = String("/bins/") + BIN_ID + "/alerts/fire_risk";
-        Firebase.RTDB.setBool(&fbdo, path, true);
-      }
-      break;
+  bool fireRisk = false;
+  bool gasRisk = false;
+  for (int i = 0; i < 3; i++) {
+    if (sensorData.temp[i] > TEMP_FIRE_THRESHOLD || sensorData.mq2[i] > MQ2_SMOKE_THRESHOLD) {
+      fireRisk = true;
+    }
+    if (sensorData.mq135[i] > MQ135_GAS_THRESHOLD) {
+      gasRisk = true;
     }
   }
 
-  // Gas leak
-  for (int i = 0; i < 3; i++) {
-    if (sensorData.mq135[i] > MQ135_GAS_THRESHOLD) {
-      Serial2.println("ALERT:GAS");
-      Serial.println("[ALERT] Gas / odour anomaly detected!");
+  if (fireRisk && now - lastFireAlert >= ALERT_INTERVAL_MS) {
+    lastFireAlert = now;
+    PI_SERIAL.println("ALERT:FIRE");
+  }
 
-      if (firebaseReady && Firebase.ready()) {
-        String path = String("/bins/") + BIN_ID + "/alerts/gas_leak";
-        Firebase.RTDB.setBool(&fbdo, path, true);
-      }
-      break;
-    }
+  if (gasRisk && now - lastGasAlert >= ALERT_INTERVAL_MS) {
+    lastGasAlert = now;
+    PI_SERIAL.println("ALERT:GAS");
   }
 }
 
-// ════════════════════════════════════════════════════════════
-//  Send data to Raspberry Pi via UART
-// ════════════════════════════════════════════════════════════
 void sendSensorDataToPi() {
-  char buf[256];
-  snprintf(buf, sizeof(buf),
-    "SENSOR:%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f",
+  char buf[320];
+  snprintf(
+    buf,
+    sizeof(buf),
+    "SENSOR:%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.2f,%d",
     sensorData.temp[0], sensorData.hum[0],
     sensorData.temp[1], sensorData.hum[1],
     sensorData.temp[2], sensorData.hum[2],
-    sensorData.mq2[0],  sensorData.mq2[1],  sensorData.mq2[2],
-    sensorData.mq135[0],sensorData.mq135[1],sensorData.mq135[2],
-    sensorData.level[0],sensorData.level[1],sensorData.level[2],
-    sensorData.vbat);
-  Serial2.println(buf);
+    sensorData.mq2[0], sensorData.mq2[1], sensorData.mq2[2],
+    sensorData.mq135[0], sensorData.mq135[1], sensorData.mq135[2],
+    sensorData.level[0], sensorData.level[1], sensorData.level[2],
+    sensorData.vbat,
+    sensorData.irState
+  );
+  PI_SERIAL.println(buf);
 }
 
-// ════════════════════════════════════════════════════════════
-//  Handle incoming UART commands from Pi
-// ════════════════════════════════════════════════════════════
+void sendLevelsToPi() {
+  sensorData.level[0] = calcFillPercent(readUltrasonicCm(US1_TRIG_PIN, US1_ECHO_PIN));
+  sensorData.level[1] = calcFillPercent(readUltrasonicCm(US2_TRIG_PIN, US2_ECHO_PIN));
+  sensorData.level[2] = calcFillPercent(readUltrasonicCm(US3_TRIG_PIN, US3_ECHO_PIN));
+
+  char buf[64];
+  snprintf(buf, sizeof(buf), "LEVELS:%d,%d,%d", sensorData.level[0], sensorData.level[1], sensorData.level[2]);
+  PI_SERIAL.println(buf);
+}
+
+void sendBatteryToPi() {
+  sensorData.vbat = readBatteryVoltage();
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "BATTERY:%.2f", sensorData.vbat);
+  PI_SERIAL.println(buf);
+}
+
 void handlePiCommands() {
-  if (!Serial2.available()) return;
+  while (PI_SERIAL.available()) {
+    String cmd = PI_SERIAL.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.length() == 0) {
+      continue;
+    }
 
-  String cmd = Serial2.readStringUntil('\n');
-  cmd.trim();
-
-  if (cmd == "CMD:READ_SENSORS") {
-    Serial.println("[CMD] Pi requested sensor read");
-    readAllSensors();
-    checkAlerts();
-    sendSensorDataToPi();
+    if (cmd == "CMD:READ_SENSORS") {
+      readAllSensors();
+      checkAlerts();
+      sendSensorDataToPi();
+    } else if (cmd == "CMD:READ_LEVELS") {
+      sendLevelsToPi();
+    } else if (cmd == "CMD:READ_BATTERY") {
+      sendBatteryToPi();
+    } else if (cmd == "CMD:READ_IR") {
+      sensorData.irState = digitalRead(IR_PIN);
+      sendIrToPi(true);
+    }
   }
-  else if (cmd == "CMD:READ_LEVELS") {
-    Serial.println("[CMD] Pi requested level read");
-    float d1 = readUltrasonic(TRIG1, ECHO1);
-    float d2 = readUltrasonic(TRIG2, ECHO2);
-    float d3 = readUltrasonic(TRIG3, ECHO3);
-    sensorData.level[0] = calcFillPercent(d1);
-    sensorData.level[1] = calcFillPercent(d2);
-    sensorData.level[2] = calcFillPercent(d3);
-
-    char buf[64];
-    snprintf(buf, sizeof(buf), "LEVELS:%d,%d,%d",
-      sensorData.level[0], sensorData.level[1], sensorData.level[2]);
-    Serial2.println(buf);
-  }
-  else if (cmd == "CMD:READ_BATTERY") {
-    int rawAdc = analogRead(VBAT_PIN);
-    sensorData.vbat = (rawAdc / 4095.0) * 3.3 * 4.0;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "BATTERY:%.1f", sensorData.vbat);
-    Serial2.println(buf);
-  }
-  else {
-    Serial.printf("[CMD] Unknown command: %s\n", cmd.c_str());
-  }
-}
-
-// ════════════════════════════════════════════════════════════
-//  Push sensor data to Firebase Realtime Database
-// ════════════════════════════════════════════════════════════
-void pushToFirebase() {
-  String basePath = String("/bins/") + BIN_ID;
-
-  // Sensors
-  Firebase.RTDB.setFloat(&fbdo, basePath + "/sensors/temperature1", sensorData.temp[0]);
-  Firebase.RTDB.setFloat(&fbdo, basePath + "/sensors/humidity1",    sensorData.hum[0]);
-  Firebase.RTDB.setFloat(&fbdo, basePath + "/sensors/temperature2", sensorData.temp[1]);
-  Firebase.RTDB.setFloat(&fbdo, basePath + "/sensors/humidity2",    sensorData.hum[1]);
-  Firebase.RTDB.setFloat(&fbdo, basePath + "/sensors/temperature3", sensorData.temp[2]);
-  Firebase.RTDB.setFloat(&fbdo, basePath + "/sensors/humidity3",    sensorData.hum[2]);
-  Firebase.RTDB.setInt(&fbdo,   basePath + "/sensors/mq2_1",       sensorData.mq2[0]);
-  Firebase.RTDB.setInt(&fbdo,   basePath + "/sensors/mq2_2",       sensorData.mq2[1]);
-  Firebase.RTDB.setInt(&fbdo,   basePath + "/sensors/mq2_3",       sensorData.mq2[2]);
-  Firebase.RTDB.setInt(&fbdo,   basePath + "/sensors/mq135_1",     sensorData.mq135[0]);
-  Firebase.RTDB.setInt(&fbdo,   basePath + "/sensors/mq135_2",     sensorData.mq135[1]);
-  Firebase.RTDB.setInt(&fbdo,   basePath + "/sensors/mq135_3",     sensorData.mq135[2]);
-
-  // Fill levels
-  Firebase.RTDB.setInt(&fbdo, basePath + "/levels/bin1_percent", sensorData.level[0]);
-  Firebase.RTDB.setInt(&fbdo, basePath + "/levels/bin2_percent", sensorData.level[1]);
-  Firebase.RTDB.setInt(&fbdo, basePath + "/levels/bin3_percent", sensorData.level[2]);
-
-  // Battery
-  Firebase.RTDB.setFloat(&fbdo, basePath + "/battery/voltage", sensorData.vbat);
-  int batPercent = map(constrain((int)(sensorData.vbat * 10), 100, 126), 100, 126, 0, 100);
-  Firebase.RTDB.setInt(&fbdo,   basePath + "/battery/percent", batPercent);
-
-  // Bin full alerts
-  Firebase.RTDB.setBool(&fbdo, basePath + "/alerts/bin1_full", sensorData.level[0] >= 95);
-  Firebase.RTDB.setBool(&fbdo, basePath + "/alerts/bin2_full", sensorData.level[1] >= 95);
-  Firebase.RTDB.setBool(&fbdo, basePath + "/alerts/bin3_full", sensorData.level[2] >= 95);
-
-  // Timestamp
-  Firebase.RTDB.setTimestamp(&fbdo, basePath + "/status/last_update");
-
-  Serial.println("[Firebase] Data pushed");
 }

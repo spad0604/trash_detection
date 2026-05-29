@@ -1,0 +1,4 @@
+pyserial>=3.5
+requests>=2.31.0
+opencv-python>=4.8.0
+ultralytics>=8.0.0
