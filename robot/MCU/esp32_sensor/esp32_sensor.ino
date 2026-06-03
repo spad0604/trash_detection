@@ -61,7 +61,7 @@ static const uint32_t USB_SERIAL_BAUD = 115200;
 static const float TEMP_FIRE_THRESHOLD = 60.0f;
 static const int MQ2_SMOKE_THRESHOLD = 800;
 static const int MQ135_GAS_THRESHOLD = 700;
-static const float BIN_HEIGHT_CM = 40.0f;
+static const float BIN_HEIGHT_CM = 18.0f;
 
 static const unsigned long SENSOR_INTERVAL_MS = 3000;
 static const unsigned long IR_POLL_INTERVAL_MS = 50;
