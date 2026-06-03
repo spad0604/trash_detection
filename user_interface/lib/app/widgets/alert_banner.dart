@@ -36,7 +36,7 @@ class AlertBanner extends StatelessWidget {
       alerts.add(
         _AlertItem(
           icon: Icons.delete_rounded,
-          text: 'Ngăn Kim loại đã đầy!',
+          text: 'Ngăn Tái chế đã đầy!',
           color: AppColors.binPlastic,
         ),
       );
@@ -45,7 +45,7 @@ class AlertBanner extends StatelessWidget {
       alerts.add(
         _AlertItem(
           icon: Icons.delete_rounded,
-          text: 'Ngăn Giấy đã đầy!',
+          text: 'Ngăn Hữu cơ đã đầy!',
           color: AppColors.binOrganic,
         ),
       );

@@ -20,7 +20,7 @@ class TrashOrchestrator(Node):
         self.declare_parameter("full_bin_move_command", "CMD:MOVE_START")
         self.declare_parameter(
             "class_to_bin",
-            '{"metal":0,"paper":1,"glass":2,"plastic":2,"waste":2,"other":2,"0":2,"1":0,"2":1,"3":2,"4":2}',
+            '{"biodegradable":1,"cardboard":0,"glass":2,"metal":0,"paper":0,"plastic":0,"other":2,"0":1,"1":0,"2":2,"3":0,"4":0,"5":0}',
         )
 
         self.cmd_pub = self.create_publisher(String, "/esp32_actuator/cmd", 10)
@@ -31,6 +31,7 @@ class TrashOrchestrator(Node):
         self.create_subscription(Bool, "/trash_bin/object_detected", self._on_object, 10)
         self.create_subscription(Empty, "/trash_bin/go_dump_request", self._on_go_dump_request, 10)
         self.create_subscription(Empty, "/trash_bin/go_home_request", self._on_go_home_request, 10)
+        self.create_subscription(Empty, "/trash_bin/stop_request", self._on_stop_request, 10)
         self.create_subscription(String, "/trash_bin/classification", self._on_classification, 10)
         self.create_subscription(String, "/esp32_actuator/status", self._on_status, 10)
         self.create_subscription(Int32MultiArray, "/trash_bin/levels", self._on_levels, 10)
@@ -98,6 +99,18 @@ class TrashOrchestrator(Node):
         self._publish_state("dump_returning")
         self._cmd("CMD:MOVE_HOME")
 
+    def _on_stop_request(self, _: Empty) -> None:
+        self.get_logger().info("stop request received")
+        self._busy = False
+        self._moving_due_to_full = False
+        self._dump_trip_active = False
+        for timer in list(self._timers):
+            timer.cancel()
+        self._timers.clear()
+        self._cmd("CMD:MOVE_STOP")
+        self._cmd("CMD:LED:OFF")
+        self._publish_state("idle")
+
     def _close_and_classify(self) -> None:
         self._publish_state("capturing")
         self._cmd("CMD:SERVO_CLOSE")
@@ -146,13 +159,13 @@ class TrashOrchestrator(Node):
             self._on_sort_done()
         elif status == "STATUS:ARRIVED_DUMP":
             if self._dump_trip_active or self._moving_due_to_full:
-                self._publish_state("awaiting_return")
+                self._publish_state("dump_completed")
             else:
                 self._publish_state("arrived")
         elif status == "STATUS:ARRIVED_HOME":
             self._moving_due_to_full = False
             self._dump_trip_active = False
-            self._publish_state("idle")
+            self._publish_state("home_completed")
         elif status == "STATUS:ARRIVED":
             self._moving_due_to_full = False
             self._dump_trip_active = False

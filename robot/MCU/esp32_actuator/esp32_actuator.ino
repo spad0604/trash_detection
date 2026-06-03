@@ -5,8 +5,8 @@
  *   CMD:CLASSIFY:<0|1|2>  -> SG2 selects bin, SG1 drops trash by 45 deg
  *   CMD:SERVO_OPEN        -> SG3 open position
  *   CMD:SERVO_CLOSE       -> SG3 close position
- *   CMD:MOVE_START        -> run PID line following
- *   CMD:MOVE_HOME         -> run PID line following, report ARRIVED as home
+ *   CMD:MOVE_START        -> run forward on the circular line to the dump marker
+ *   CMD:MOVE_HOME         -> continue forward on the circular line to the home marker
  *   CMD:MOVE_STOP         -> stop motors
  *   CMD:STATUS            -> send status + one telemetry snapshot now
  *   CMD:LED:<RED|GREEN|YELLOW|OFF>
@@ -32,7 +32,7 @@ static const int SG3_AUX_PIN = 25;     // lid/aux mechanism
 static const int LEFT_FORWARD_PIN = 23;   // IN_M1
 static const int LEFT_BACKWARD_PIN = 22;  // IN_M2
 static const int RIGHT_FORWARD_PIN = 19;  // IN_M3
-static const int RIGHT_BACKWARD_PIN = 18; // IN_M4
+static const int RIGHT_BACKWARD_PIN = 21; // IN_M4
 static const bool LEFT_REVERSED = false;
 static const bool RIGHT_REVERSED = false;
 
@@ -56,36 +56,36 @@ static const int SERVO_MAX_US = 2400;
 // Tune on the real mechanism.
 static const int DROP_HOME_ANGLE = 0;
 static const int DROP_RELEASE_ANGLE = 45;
+static const int SELECT_HOME_BIN = 0;
 static const int AUX_CLOSED_ANGLE = 0;
 static const int AUX_OPEN_ANGLE = 90;
-static const int BIN_ANGLES[3] = {30, 90, 150};  // three 60-degree sectors over 180 degrees
+static const int BIN_ANGLES[3] = {0, 100, 180};  // three 60-degree sectors over 180 degrees
 static const unsigned long SELECT_SETTLE_MS = 700;
 static const unsigned long DROP_HOLD_MS = 700;
 static const unsigned long DROP_RETURN_MS = 400;
-static const unsigned long TURN_AROUND_MS = 900;
-static const int TURN_AROUND_SPEED = 130;
+static const int START_CLEAR_SPEED = 150;
+static const int ENDPOINT_MIN_ACTIVE = 3;
+static const unsigned long START_IGNORE_MS = 1000;
+static const unsigned long LOST_BRIDGE_MS = 120;
+static const unsigned long MOVING_TELEMETRY_MS = 250;
 
 int blackCal[5] = {0, 0, 0, 0, 0};
 int whiteCal[5] = {4095, 4095, 4095, 4095, 4095};
 int detectThreshold = 200;
 
-int baseSpeed = 130;
+int baseSpeed = 170;
 int minRunSpeed = 55;
-int maxSpeed = 210;
-int bridgeSpeed = 90;
-int searchSpeed = 120;
-float kp = 0.070f;
+int maxSpeed = 185;
+int turnSlowSpeed = 55;
+float kp = 0.060f;
 float ki = 0.000f;
-float kd = 0.018f;
+float kd = 0.120f;
 
-unsigned long bridgeLineGapMs = 120;
-unsigned long searchLineGapMs = 900;
-unsigned long endpointHoldMs = 250;
 enum SystemState {
   STATE_IDLE,
   STATE_SORTING,
   STATE_MOVING,
-  STATE_RETURNING_HOME,
+  STATE_MOVING_HOME,
   STATE_LINE_LOST
 };
 
@@ -107,16 +107,43 @@ bool moving = false;
 bool lineLostReported = false;
 
 unsigned long lastPidUs = 0;
-unsigned long lastLineSeenMs = 0;
-unsigned long endpointSeenSinceMs = 0;
-float integral = 0.0f;
-float lastError = 0.0f;
-float lastSeenError = 0.0f;
+unsigned long lastMovingTelemetryMs = 0;
+unsigned long lineLostSinceMs = 0;
+unsigned long navigationStartMs = 0;
+bool endpointArmed = true;
+long lastSeenPosition = 0;
 int lastSearchDir = 1;
-int lastLeftSpeed = 0;
-int lastRightSpeed = 0;
+int lastLeftMagnitude = 105;
+int lastRightMagnitude = 105;
+float pidIntegral = 0.0f;
+float pidLastError = 0.0f;
 
 LineRead lastLine;
+
+void stopMotors();
+void allLedsOff();
+void sendTelemetry();
+void sendMovingTelemetry();
+void sendStatus();
+void handlePiCommands();
+void sortToBin(int targetBin);
+void startLineFollow(bool returningHome);
+void stopMovement(const char *statusLine);
+LineRead readLineSensors();
+int normalizedLineStrength(int sensorIndex, int rawValue);
+void followLinePid(const LineRead &line);
+bool clearStartMarker(const LineRead &line);
+bool stopAtEndpoint(const LineRead &line);
+bool hasContiguousActiveBlock(const LineRead &line);
+bool isEndpointMarker(const LineRead &line);
+void followVisibleLineSimple(const LineRead &line);
+void recoverLostLine();
+void driveStraight(int speedMagnitude);
+void driveDifferential(int leftMagnitude, int rightMagnitude);
+void stopLostLine();
+int clampMagnitude(int speed);
+void setMotorSpeeds(int leftSpeed, int rightSpeed);
+void driveMotor(int forwardPin, int backwardPin, int speed);
 
 void setupMotorPin(int pin) {
   pinMode(pin, OUTPUT);
@@ -169,8 +196,9 @@ void loop() {
   handlePiCommands();
 
   lastLine = readLineSensors();
-  if (currentState == STATE_MOVING || currentState == STATE_RETURNING_HOME) {
+  if (currentState == STATE_MOVING || currentState == STATE_MOVING_HOME) {
     followLinePid(lastLine);
+    sendMovingTelemetry();
   }
 }
 
@@ -238,6 +266,9 @@ void sortToBin(int targetBin) {
   delay(DROP_HOLD_MS);
   servoDrop.write(DROP_HOME_ANGLE);
   delay(DROP_RETURN_MS);
+  currentBin = SELECT_HOME_BIN;
+  servoSelect.write(BIN_ANGLES[currentBin]);
+  delay(SELECT_SETTLE_MS);
 
   allLedsOff();
   digitalWrite(LED_GREEN, HIGH);
@@ -247,30 +278,30 @@ void sortToBin(int targetBin) {
 }
 
 void startLineFollow(bool returningHome) {
-  if (returningHome) {
-    setMotorSpeeds(TURN_AROUND_SPEED, -TURN_AROUND_SPEED);
-    delay(TURN_AROUND_MS);
-    stopMotors();
-  }
-
-  currentState = returningHome ? STATE_RETURNING_HOME : STATE_MOVING;
+  stopMotors();
+  currentState = returningHome ? STATE_MOVING_HOME : STATE_MOVING;
   moving = true;
   lineLostReported = false;
-  endpointSeenSinceMs = 0;
-  integral = 0.0f;
-  lastError = 0.0f;
-  lastLineSeenMs = millis();
+  lineLostSinceMs = 0;
+  lastMovingTelemetryMs = 0;
+  navigationStartMs = millis();
+  endpointArmed = false;
+  pidIntegral = 0.0f;
+  pidLastError = 0.0f;
   lastPidUs = micros();
   allLedsOff();
   digitalWrite(LED_YELLOW, HIGH);
-  PI_SERIAL.println("STATUS:MOVING");
+  PI_SERIAL.println(returningHome ? "STATUS:MOVING_HOME" : "STATUS:MOVING_TO_DUMP");
+  sendTelemetry();
 }
 
 void stopMovement(const char *statusLine) {
   stopMotors();
   moving = false;
   currentState = STATE_IDLE;
-  endpointSeenSinceMs = 0;
+  endpointArmed = true;
+  pidIntegral = 0.0f;
+  pidLastError = 0.0f;
   allLedsOff();
   PI_SERIAL.println(statusLine);
   sendTelemetry();
@@ -312,90 +343,141 @@ int normalizedLineStrength(int sensorIndex, int rawValue) {
 }
 
 void followLinePid(const LineRead &line) {
-  unsigned long nowMs = millis();
-
-  if (line.activeCount >= 5) {
-    if (endpointSeenSinceMs == 0) {
-      endpointSeenSinceMs = nowMs;
-    }
-    if (nowMs - endpointSeenSinceMs >= endpointHoldMs) {
-      if (currentState == STATE_RETURNING_HOME) {
-        stopMovement("STATUS:ARRIVED_HOME");
-      } else {
-        stopMovement("STATUS:ARRIVED_DUMP");
-      }
-      return;
-    }
-  } else {
-    endpointSeenSinceMs = 0;
+  if (clearStartMarker(line)) {
+    return;
   }
 
-  unsigned long nowUs = micros();
-  float dt = (lastPidUs == 0) ? 0.01f : (nowUs - lastPidUs) / 1000000.0f;
-  lastPidUs = nowUs;
-  if (dt <= 0.0f || dt > 0.2f) {
-    dt = 0.01f;
+  if (stopAtEndpoint(line)) {
+    return;
   }
 
   if (line.activeCount == 0) {
-    recoverLostLine(nowMs);
+    recoverLostLine();
     return;
   }
 
-  lineLostReported = false;
-  lastLineSeenMs = nowMs;
-  float error = (float)line.position;
-  lastSeenError = error;
-  if (error > 150.0f) {
-    lastSearchDir = 1;
-  } else if (error < -150.0f) {
-    lastSearchDir = -1;
-  }
-
-  integral += error * dt;
-  integral = constrain(integral, -5000.0f, 5000.0f);
-  float derivative = (error - lastError) / dt;
-  lastError = error;
-
-  float correction = kp * error + ki * integral + kd * derivative;
-  int leftSpeed = clampRunSpeed((int)(baseSpeed + correction));
-  int rightSpeed = clampRunSpeed((int)(baseSpeed - correction));
-  setMotorSpeeds(leftSpeed, rightSpeed);
-  lastLeftSpeed = leftSpeed;
-  lastRightSpeed = rightSpeed;
+  followVisibleLineSimple(line);
 }
 
-void recoverLostLine(unsigned long nowMs) {
-  unsigned long lostMs = (lastLineSeenMs == 0) ? searchLineGapMs + 1 : nowMs - lastLineSeenMs;
-  integral = 0.0f;
+bool clearStartMarker(const LineRead &line) {
+  unsigned long elapsedMs = millis() - navigationStartMs;
+  if (elapsedMs >= START_IGNORE_MS || line.activeCount < ENDPOINT_MIN_ACTIVE) {
+    endpointArmed = true;
+    return false;
+  }
 
-  if (lostMs <= bridgeLineGapMs) {
-    int leftSpeed = clampRecoverySpeed(lastLeftSpeed, bridgeSpeed);
-    int rightSpeed = clampRecoverySpeed(lastRightSpeed, bridgeSpeed);
-    if (leftSpeed == 0 && rightSpeed == 0) {
-      leftSpeed = bridgeSpeed;
-      rightSpeed = bridgeSpeed;
+  driveStraight(START_CLEAR_SPEED);
+  return true;
+}
+
+bool stopAtEndpoint(const LineRead &line) {
+  unsigned long elapsedMs = millis() - navigationStartMs;
+  if (elapsedMs < START_IGNORE_MS || !endpointArmed || !isEndpointMarker(line)) {
+    return false;
+  }
+  stopMovement(currentState == STATE_MOVING_HOME ? "STATUS:ARRIVED_HOME" : "STATUS:ARRIVED_DUMP");
+  return true;
+}
+
+bool hasContiguousActiveBlock(const LineRead &line) {
+  int first = -1;
+  int last = -1;
+  for (int i = 0; i < 5; i++) {
+    if (line.active[i]) {
+      if (first < 0) {
+        first = i;
+      }
+      last = i;
     }
-    setMotorSpeeds(leftSpeed, rightSpeed);
+  }
+
+  if (first < 0) {
+    return false;
+  }
+
+  for (int i = first; i <= last; i++) {
+    if (!line.active[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool isEndpointMarker(const LineRead &line) {
+  return line.activeCount >= ENDPOINT_MIN_ACTIVE && hasContiguousActiveBlock(line);
+}
+
+void followVisibleLineSimple(const LineRead &line) {
+  lineLostReported = false;
+  lineLostSinceMs = 0;
+  lastSeenPosition = line.position;
+  if (line.position < -150) {
+    lastSearchDir = -1;
+  } else if (line.position > 150) {
+    lastSearchDir = 1;
+  }
+
+  int leftMagnitude = baseSpeed;
+  int rightMagnitude = baseSpeed;
+  float error = (float)line.position;
+  pidIntegral += error;
+  pidIntegral = constrain(pidIntegral, -4000.0f, 4000.0f);
+  float derivative = error - pidLastError;
+  pidLastError = error;
+
+  float output = (kp * error) + (ki * pidIntegral) + (kd * derivative);
+  int correction = (int)output;
+
+  leftMagnitude = baseSpeed - correction;
+  rightMagnitude = baseSpeed + correction;
+
+  if (line.position < -500) {
+    leftMagnitude = turnSlowSpeed;
+    rightMagnitude = baseSpeed;
+  } else if (line.position > 500) {
+    leftMagnitude = baseSpeed;
+    rightMagnitude = turnSlowSpeed;
+  }
+
+  driveDifferential(leftMagnitude, rightMagnitude);
+}
+
+void recoverLostLine() {
+  unsigned long nowMs = millis();
+  if (lineLostSinceMs == 0) {
+    lineLostSinceMs = nowMs;
+  }
+
+  unsigned long lostMs = nowMs - lineLostSinceMs;
+  if (lostMs <= LOST_BRIDGE_MS) {
+    driveDifferential(lastLeftMagnitude, lastRightMagnitude);
     return;
   }
 
-  if (lostMs <= searchLineGapMs) {
-    int dir = lastSearchDir;
-    if (lastSeenError > 100.0f || lastSeenError < -100.0f) {
-      dir = (lastSeenError > 0.0f) ? 1 : -1;
-    }
-    if (dir > 0) {
-      setMotorSpeeds(searchSpeed, -searchSpeed);
-    } else {
-      setMotorSpeeds(-searchSpeed, searchSpeed);
-    }
-    return;
-  }
+  stopLostLine();
+}
 
+void driveStraight(int speedMagnitude) {
+  int magnitude = clampMagnitude(speedMagnitude);
+  setMotorSpeeds(magnitude, magnitude);
+}
+
+void driveDifferential(int leftMagnitude, int rightMagnitude) {
+  leftMagnitude = clampMagnitude(leftMagnitude);
+  rightMagnitude = clampMagnitude(rightMagnitude);
+  lastLeftMagnitude = leftMagnitude;
+  lastRightMagnitude = rightMagnitude;
+  setMotorSpeeds(leftMagnitude, rightMagnitude);
+}
+
+void stopLostLine() {
   stopMotors();
   moving = false;
   currentState = STATE_LINE_LOST;
+  endpointArmed = true;
+  pidIntegral = 0.0f;
+  pidLastError = 0.0f;
+  lineLostSinceMs = 0;
   if (!lineLostReported) {
     PI_SERIAL.println("STATUS:LINE_LOST");
     lineLostReported = true;
@@ -403,23 +485,17 @@ void recoverLostLine(unsigned long nowMs) {
   }
 }
 
-int clampRecoverySpeed(int speed, int fallbackAbsSpeed) {
-  if (speed == 0) {
-    return 0;
+void sendMovingTelemetry() {
+  unsigned long nowMs = millis();
+  if (nowMs - lastMovingTelemetryMs < MOVING_TELEMETRY_MS) {
+    return;
   }
-  int sign = speed > 0 ? 1 : -1;
-  int magnitude = constrain(abs(speed), minRunSpeed, fallbackAbsSpeed);
-  return sign * magnitude;
+  lastMovingTelemetryMs = nowMs;
+  sendTelemetry();
 }
 
-int clampRunSpeed(int speed) {
-  if (speed == 0) {
-    return 0;
-  }
-  if (speed > 0) {
-    return constrain(speed, minRunSpeed, maxSpeed);
-  }
-  return constrain(speed, -maxSpeed, -minRunSpeed);
+int clampMagnitude(int speed) {
+  return constrain(speed, minRunSpeed, maxSpeed);
 }
 
 void setMotorSpeeds(int leftSpeed, int rightSpeed) {
@@ -452,8 +528,6 @@ void stopMotors() {
   ledcWrite(LEFT_BACKWARD_PIN, 0);
   ledcWrite(RIGHT_FORWARD_PIN, 0);
   ledcWrite(RIGHT_BACKWARD_PIN, 0);
-  lastLeftSpeed = 0;
-  lastRightSpeed = 0;
 }
 
 void allLedsOff() {
@@ -467,7 +541,7 @@ const char *stateName() {
     case STATE_IDLE: return "IDLE";
     case STATE_SORTING: return "SORTING";
     case STATE_MOVING: return "MOVING";
-    case STATE_RETURNING_HOME: return "RETURNING_HOME";
+    case STATE_MOVING_HOME: return "MOVING_HOME";
     case STATE_LINE_LOST: return "LINE_LOST";
   }
   return "UNKNOWN";
@@ -477,13 +551,17 @@ void sendStatus() {
   switch (currentState) {
     case STATE_IDLE: PI_SERIAL.println("STATUS:IDLE"); break;
     case STATE_SORTING: PI_SERIAL.println("STATUS:SORTING"); break;
-    case STATE_MOVING:
-    case STATE_RETURNING_HOME: PI_SERIAL.println("STATUS:MOVING"); break;
+    case STATE_MOVING: PI_SERIAL.println("STATUS:MOVING_TO_DUMP"); break;
+    case STATE_MOVING_HOME: PI_SERIAL.println("STATUS:MOVING_HOME"); break;
     case STATE_LINE_LOST: PI_SERIAL.println("STATUS:LINE_LOST"); break;
   }
 }
 
 void sendTelemetry() {
+  if (PI_SERIAL.availableForWrite() < 96) {
+    return;
+  }
+
   PI_SERIAL.print("ACT:");
   PI_SERIAL.print(stateName());
   PI_SERIAL.print(",");

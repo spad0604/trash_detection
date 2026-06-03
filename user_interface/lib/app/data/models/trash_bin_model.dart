@@ -119,6 +119,8 @@ class TrashBinModel {
   bool get isDumping =>
       state == 'dump_requested' ||
       state == 'dump_outbound' ||
+      state == 'home_requested' ||
       state == 'dump_returning';
-  bool get isWaitingAtDump => state == 'awaiting_return';
+  bool get isWaitingAtDump => state == 'awaiting_return' || state == 'dump_completed';
+  bool get isHomeCompleted => state == 'home_completed';
 }

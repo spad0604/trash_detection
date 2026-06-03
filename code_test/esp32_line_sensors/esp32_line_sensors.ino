@@ -34,7 +34,7 @@ int whiteCal[5] = {4095, 4095, 4095, 4095, 4095};
 int detectThreshold = 200;
 
 // Tune these first: baseSpeed, kp, then kd. Keep ki at 0 unless needed.
-int baseSpeed = 130;
+int baseSpeed = 200;
 int minRunSpeed = 55;
 int maxSpeed = 210;
 int bridgeSpeed = 90;

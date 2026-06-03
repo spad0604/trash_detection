@@ -239,6 +239,85 @@ Full flow:
 6. ESP32 sensor cap nhat muc rac.
 7. Pi day data len Firebase.
 
+## 9.0. Tu dong chay full pipeline khi bat Pi
+
+Dung `systemd` de Pi boot xong tu vao pixi environment roi chay tat ca node trong `bringup.launch.py`:
+
+- `sensor_bridge`
+- `actuator_bridge`
+- `yolo_classifier`
+- `trash_orchestrator`
+- `firebase_bridge`
+
+Tren Pi, dam bao workspace da build duoc bang lenh o muc 2, sau do:
+
+```bash
+cd ~/trash_ws
+chmod +x ~/trash_ws/src/trash_sorting_ros/scripts/start_full_pipeline.sh
+sudo cp ~/trash_ws/src/trash_sorting_ros/systemd/trash-sorting.service /etc/systemd/system/trash-sorting.service
+```
+
+Service mac dinh dung cac duong dan:
+
+```text
+Workspace: /home/giap/trash_ws
+Pixi env:  /home/giap/robot/Pi/ros2_env
+Pixi bin:  /home/giap/.pixi/bin/pixi
+```
+
+Neu Pi cua ban cai `pixi` o duong dan khac, kiem tra bang:
+
+```bash
+which pixi
+```
+
+roi sua dong `PIXI_BIN=` trong service.
+
+Neu tren Pi chua co folder `systemd` trong package, copy file service tu may dev sang Pi:
+
+```bash
+scp robot/Pi/trash_sorting_ros/systemd/trash-sorting.service giap@<PI_IP>:/tmp/trash-sorting.service
+ssh giap@<PI_IP>
+sudo cp /tmp/trash-sorting.service /etc/systemd/system/trash-sorting.service
+```
+
+Cap quyen serial/camera cho user `giap`:
+
+```bash
+sudo usermod -aG dialout,video giap
+sudo reboot
+```
+
+Sau khi Pi boot lai, bat service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable trash-sorting.service
+sudo systemctl start trash-sorting.service
+```
+
+Kiem tra trang thai va log:
+
+```bash
+systemctl status trash-sorting.service
+journalctl -u trash-sorting.service -f
+```
+
+Tat autostart khi can debug thu cong:
+
+```bash
+sudo systemctl stop trash-sorting.service
+sudo systemctl disable trash-sorting.service
+```
+
+Neu user tren Pi khong phai `giap`, sua cac dong `User=`, `Group=`, `/home/giap/...` trong:
+
+```bash
+sudo nano /etc/systemd/system/trash-sorting.service
+sudo systemctl daemon-reload
+sudo systemctl restart trash-sorting.service
+```
+
 ## 9.1. Lenh di do rac tu Firebase/UI
 
 UI nut `Di do rac` ghi:

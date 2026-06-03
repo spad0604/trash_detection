@@ -38,10 +38,12 @@ class FirebaseBridge(Node):
         self.create_subscription(String, "/trash_bin/actuator", self._on_actuator, 10)
         self.go_dump_pub = self.create_publisher(Empty, "/trash_bin/go_dump_request", 10)
         self.go_home_pub = self.create_publisher(Empty, "/trash_bin/go_home_request", 10)
+        self.stop_pub = self.create_publisher(Empty, "/trash_bin/stop_request", 10)
         self.command_timer = self.create_timer(
             float(self.get_parameter("command_poll_interval_seconds").value),
             self._poll_commands,
         )
+        self._state = "offline"
 
         if requests is None:
             self.get_logger().warn("requests is not installed; Firebase bridge is disabled")
@@ -120,7 +122,35 @@ class FirebaseBridge(Node):
         )
 
     def _on_state(self, msg: String) -> None:
-        self._patch_bin({"status": {"state": msg.data.strip(), "last_update": self._now_ms()}})
+        self._state = msg.data.strip()
+        now_ms = self._now_ms()
+        patch: Dict[str, Any] = {"status": {"state": self._state, "last_update": now_ms}}
+        if self._state == "dump_completed":
+            patch["navigation"] = {
+                "dump_completed": True,
+                "home_completed": False,
+                "last_dump_completed": now_ms,
+            }
+            patch["commands"] = {"go_dump": False}
+        elif self._state == "home_completed":
+            patch["navigation"] = {
+                "dump_completed": False,
+                "home_completed": True,
+                "last_home_completed": now_ms,
+            }
+            patch["commands"] = {"go_home": False}
+        elif self._state in {"dump_outbound", "dump_requested"}:
+            patch["navigation"] = {
+                "dump_completed": False,
+                "home_completed": False,
+                "last_dump_started": now_ms,
+            }
+        elif self._state in {"dump_returning", "home_requested"}:
+            patch["navigation"] = {
+                "home_completed": False,
+                "last_home_started": now_ms,
+            }
+        self._patch_bin(patch)
 
     def _on_actuator(self, msg: String) -> None:
         try:
@@ -154,6 +184,28 @@ class FirebaseBridge(Node):
         try:
             timeout = float(self.get_parameter("http_timeout_seconds").value)
 
+            stop_response = requests.get(self._json_url("commands/stop"), timeout=timeout)
+            if stop_response.status_code >= 300:
+                self.get_logger().warn(
+                    f"Firebase command GET failed {stop_response.status_code}: {stop_response.text[:160]}"
+                )
+                return
+            if stop_response.json() is True:
+                self.get_logger().info("firebase command received: stop")
+                self.stop_pub.publish(Empty())
+                self._patch_bin(
+                    {
+                        "commands": {
+                            "stop": False,
+                            "go_dump": False,
+                            "go_home": False,
+                            "last_stop_request": self._now_ms(),
+                        },
+                        "status": {"state": "stop_requested", "last_update": self._now_ms()},
+                    }
+                )
+                return
+
             dump_response = requests.get(self._json_url("commands/go_dump"), timeout=timeout)
             if dump_response.status_code >= 300:
                 self.get_logger().warn(
@@ -161,17 +213,21 @@ class FirebaseBridge(Node):
                 )
                 return
             if dump_response.json() is True:
-                self.get_logger().info("firebase command received: go_dump")
-                self.go_dump_pub.publish(Empty())
-                self._patch_bin(
-                    {
-                        "commands": {
-                            "go_dump": False,
-                            "last_go_dump_request": self._now_ms(),
-                        },
-                        "status": {"state": "dump_requested", "last_update": self._now_ms()},
-                    }
-                )
+                if self._can_go_dump():
+                    self.get_logger().info("firebase command received: go_dump")
+                    self.go_dump_pub.publish(Empty())
+                    self._patch_bin(
+                        {
+                            "commands": {
+                                "go_dump": False,
+                                "last_go_dump_request": self._now_ms(),
+                            },
+                            "status": {"state": "dump_requested", "last_update": self._now_ms()},
+                        }
+                    )
+                else:
+                    self.get_logger().warn(f"ignored go_dump command while state={self._state}")
+                    self._patch_bin({"commands": {"go_dump": False}})
 
             home_response = requests.get(self._json_url("commands/go_home"), timeout=timeout)
             if home_response.status_code >= 300:
@@ -180,19 +236,29 @@ class FirebaseBridge(Node):
                 )
                 return
             if home_response.json() is True:
-                self.get_logger().info("firebase command received: go_home")
-                self.go_home_pub.publish(Empty())
-                self._patch_bin(
-                    {
-                        "commands": {
-                            "go_home": False,
-                            "last_go_home_request": self._now_ms(),
-                        },
-                        "status": {"state": "home_requested", "last_update": self._now_ms()},
-                    }
-                )
+                if self._can_go_home():
+                    self.get_logger().info("firebase command received: go_home")
+                    self.go_home_pub.publish(Empty())
+                    self._patch_bin(
+                        {
+                            "commands": {
+                                "go_home": False,
+                                "last_go_home_request": self._now_ms(),
+                            },
+                            "status": {"state": "home_requested", "last_update": self._now_ms()},
+                        }
+                    )
+                else:
+                    self.get_logger().warn(f"ignored go_home command while state={self._state}")
+                    self._patch_bin({"commands": {"go_home": False}})
         except Exception as exc:
             self.get_logger().warn(f"Firebase command poll error: {exc}")
+
+    def _can_go_dump(self) -> bool:
+        return self._state in {"idle", "arrived", "home_completed", "line_lost", "offline"}
+
+    def _can_go_home(self) -> bool:
+        return self._state in {"awaiting_return", "dump_completed", "line_lost"}
 
     def _level_alerts(self, levels: Dict[str, Any]) -> Dict[str, bool]:
         threshold = int(self.get_parameter("full_threshold_percent").value)

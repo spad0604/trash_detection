@@ -51,10 +51,19 @@ class TrashBinRepository {
         .set(ServerValue.timestamp);
   }
 
-  /// Request robot to rotate 180 degrees and follow the line home.
+  /// Request robot to continue forward on the circular line to the home marker.
   Future<void> requestGoHome(String binId) async {
     debugPrint('[TrashBinRepository] requestGoHome binId=$binId');
     await _dbRef.child('bins/$binId/commands/go_home').set(true);
+    await _dbRef
+        .child('bins/$binId/commands/requested_at')
+        .set(ServerValue.timestamp);
+  }
+
+  /// Stop robot movement immediately.
+  Future<void> requestStop(String binId) async {
+    debugPrint('[TrashBinRepository] requestStop binId=$binId');
+    await _dbRef.child('bins/$binId/commands/stop').set(true);
     await _dbRef
         .child('bins/$binId/commands/requested_at')
         .set(ServerValue.timestamp);

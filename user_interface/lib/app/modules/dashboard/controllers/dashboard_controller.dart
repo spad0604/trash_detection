@@ -81,6 +81,20 @@ class DashboardController extends GetxController {
     }
   }
 
+  Future<void> requestStop() async {
+    try {
+      debugPrint(
+        '[DashboardController] requestStop selectedBinId=${selectedBinId.value}',
+      );
+      await _repository.requestStop(selectedBinId.value);
+      Get.snackbar('Command', 'Da gui lenh dung');
+    } catch (e) {
+      debugPrint('[DashboardController] requestStop error: $e');
+      Get.snackbar('Firebase error', e.toString());
+      rethrow;
+    }
+  }
+
   // ── Computed getters for UI ─────────────────────────────
   String get statusText {
     final bin = currentBin.value;
@@ -98,11 +112,14 @@ class DashboardController extends GetxController {
       case 'dump_requested':
         return 'Đã yêu cầu đổ rác';
       case 'awaiting_return':
+      case 'dump_completed':
         return 'Đang chờ lệnh về nhà';
       case 'home_requested':
         return 'Đã yêu cầu về nhà';
       case 'dump_returning':
-        return 'Đang quay về';
+        return 'Đang về nhà';
+      case 'home_completed':
+        return 'Đã về nhà';
       case 'line_lost':
         return 'Mất line';
       case 'alert':

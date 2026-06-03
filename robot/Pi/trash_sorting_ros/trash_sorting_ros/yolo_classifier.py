@@ -30,7 +30,7 @@ class YoloClassifier(Node):
         self.declare_parameter("debug_image_dir", "")
         self.declare_parameter(
             "trash_class_map",
-            '{"metal":0,"paper":1,"glass":2,"plastic":2,"waste":2,"other":2,"0":2,"1":0,"2":1,"3":2,"4":2}',
+            '{"biodegradable":1,"cardboard":0,"glass":2,"metal":0,"paper":0,"plastic":0,"other":2,"0":1,"1":0,"2":2,"3":0,"4":0,"5":0}',
         )
 
         self.publisher = self.create_publisher(String, "/trash_bin/classification", 10)
@@ -98,12 +98,14 @@ class YoloClassifier(Node):
 
         yolo_result = self._model(frame, verbose=False)[0]
         debug_dir = str(self.get_parameter("debug_image_dir").value)
-        if debug_dir:
-            self._save_debug_image(yolo_result.plot(), "annotated")
 
         boxes = getattr(yolo_result, "boxes", None)
         if boxes is None or len(boxes) == 0:
             return None
+
+        names = getattr(yolo_result, "names", {}) or {}
+        if debug_dir:
+            self._save_debug_image(self._draw_grouped_boxes(frame, boxes, names), "annotated")
 
         best = max(boxes, key=lambda box: float(box.conf[0]))
         confidence = float(best.conf[0])
@@ -111,13 +113,14 @@ class YoloClassifier(Node):
             return None
 
         raw_class_id = int(best.cls[0])
-        names = getattr(yolo_result, "names", {}) or {}
         detected_label = str(names.get(raw_class_id, raw_class_id)).lower()
         bin_index = self._bin_for_label(detected_label, raw_class_id)
-        bin_label = self._bin_label(bin_index)
+        group_label = self._bin_label(bin_index)
+        display_label = self._display_label(bin_index)
 
         return {
-            "label": bin_label,
+            "label": group_label,
+            "display_label": display_label,
             "detected_label": detected_label,
             "class_id": raw_class_id,
             "bin_index": bin_index,
@@ -139,7 +142,113 @@ class YoloClassifier(Node):
 
     @staticmethod
     def _bin_label(bin_index: int) -> str:
-        return {0: "metal", 1: "paper", 2: "other"}.get(bin_index, "other")
+        return {0: "Tái chế", 1: "Hữu cơ", 2: "Khác"}.get(bin_index, "Khác")
+
+    @staticmethod
+    def _display_label(bin_index: int) -> str:
+        # OpenCV's built-in font is ASCII-oriented, so debug images use
+        # unaccented text while JSON/Firebase keeps Vietnamese labels.
+        return {0: "Tai che", 1: "Huu co", 2: "Khac"}.get(bin_index, "Khac")
+
+    def _draw_grouped_boxes(self, frame: Any, boxes: Any, names: Dict[int, Any]) -> Any:
+        try:
+            import cv2
+        except ImportError:
+            return frame
+
+        annotated = frame.copy()
+        for box in boxes:
+            confidence = float(box.conf[0])
+            if confidence < float(self.get_parameter("confidence_threshold").value):
+                continue
+
+            class_id = int(box.cls[0])
+            detected_label = str(names.get(class_id, class_id)).lower()
+            bin_index = self._bin_for_label(detected_label, class_id)
+            label = f"{self._bin_label(bin_index)} {confidence:.2f}"
+
+            xyxy = box.xyxy[0].tolist()
+            x1, y1, x2, y2 = [int(round(value)) for value in xyxy]
+            color = {
+                0: (36, 180, 80),
+                1: (52, 152, 219),
+                2: (140, 140, 140),
+            }.get(bin_index, (140, 140, 140))
+
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            annotated = self._draw_box_label(annotated, x1, y1, label, color)
+
+        return annotated
+
+    def _draw_box_label(self, image: Any, x: int, y: int, label: str, color: tuple[int, int, int]) -> Any:
+        try:
+            import cv2
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            return self._draw_ascii_box_label(image, x, y, label, color)
+
+        try:
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(rgb)
+            draw = ImageDraw.Draw(pil_image)
+            font = self._load_label_font(18)
+            bbox = draw.textbbox((0, 0), label, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            label_y = max(0, y - text_h - 10)
+            rgb_color = (color[2], color[1], color[0])
+            draw.rectangle((x, label_y, x + text_w + 10, label_y + text_h + 8), fill=rgb_color)
+            draw.text((x + 5, label_y + 4), label, font=font, fill=(255, 255, 255))
+            return cv2.cvtColor(
+                # numpy is already imported by cv2 in the runtime path; import lazily to keep startup light.
+                __import__("numpy").array(pil_image),
+                cv2.COLOR_RGB2BGR,
+            )
+        except Exception:
+            return self._draw_ascii_box_label(image, x, y, label, color)
+
+    @staticmethod
+    def _load_label_font(size: int) -> Any:
+        from PIL import ImageFont
+
+        for font_path in (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ):
+            try:
+                return ImageFont.truetype(font_path, size)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+    def _draw_ascii_box_label(self, image: Any, x: int, y: int, label: str, color: tuple[int, int, int]) -> Any:
+        try:
+            import cv2
+        except ImportError:
+            return image
+
+        ascii_label = (
+            label.replace("Tái chế", "Tai che")
+            .replace("Hữu cơ", "Huu co")
+            .replace("Khác", "Khac")
+        )
+        text_size, baseline = cv2.getTextSize(ascii_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        text_w, text_h = text_size
+        label_y1 = max(0, y - text_h - baseline - 6)
+        label_y2 = max(text_h + baseline + 6, y)
+        cv2.rectangle(image, (x, label_y1), (x + text_w + 8, label_y2), color, -1)
+        cv2.putText(
+            image,
+            ascii_label,
+            (x + 4, label_y2 - baseline - 3),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        return image
 
     def _resolve_model_path(self, model_path: str) -> str:
         env_path = os.getenv("TRASH_YOLO_MODEL", "").strip()
@@ -179,7 +288,8 @@ class YoloClassifier(Node):
         fallback_bin = max(0, min(2, int(self.get_parameter("fallback_bin").value)))
         self.get_logger().warn(f"using fallback classification: {reason}, bin={fallback_bin}")
         return {
-            "label": "other",
+            "label": self._bin_label(fallback_bin),
+            "display_label": self._display_label(fallback_bin),
             "class_id": fallback_bin,
             "bin_index": fallback_bin,
             "confidence": 0.0,

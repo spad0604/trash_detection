@@ -1,0 +1,22 @@
+[Unit]
+Description=Trash sorting robot ROS2 bringup
+Wants=network-online.target
+After=network-online.target systemd-udev-settle.service
+
+[Service]
+Type=simple
+User=giap
+Group=giap
+WorkingDirectory=/home/giap/trash_ws
+Environment=TRASH_WS_DIR=/home/giap/trash_ws
+Environment=TRASH_CONFIG_FILE=/home/giap/trash_ws/src/trash_sorting_ros/config/pipeline.yaml
+Environment=TRASH_PIXI_DIR=/home/giap/robot/Pi/ros2_env
+Environment=PIXI_BIN=/home/giap/.pixi/bin/pixi
+Environment=PATH=/home/giap/.pixi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=/bin/sleep 5
+ExecStart=/bin/bash /home/giap/trash_ws/src/trash_sorting_ros/scripts/start_full_pipeline.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

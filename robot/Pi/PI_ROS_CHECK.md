@@ -1,11 +1,13 @@
 # Pi ROS implementation check
 
+Kiến trúc ROS2 (node/topic/luồng) chi tiết: xem `robot/Pi/trash_sorting_ros/docs/ROS_ARCHITECTURE.md`.
+
 ## Files added
 
 - `robot/Pi/trash_sorting_ros/`: ROS2 Python package for Raspberry Pi.
 - `sensor_bridge`: reads ESP sensor UART, parses sensors/levels/IR/alerts.
 - `actuator_bridge`: writes actuator commands and publishes actuator status.
-- `actuator_bridge`: also parses periodic `ACT:` telemetry from ESP32 #2.
+- `actuator_bridge`: also parses `ACT:` telemetry from ESP32 #2 (khi firmware có gửi).
 - `trash_orchestrator`: runs the main flow from IR detection to classification, sorting, LED timing, level update, and full-bin move.
 - `yolo_classifier`: camera + YOLO inference node. If no model is configured, it falls back to bin 2 (`other`) so the ROS graph still runs.
 - `firebase_bridge`: pushes data to Firebase Realtime Database REST endpoint used by Flutter.
@@ -13,7 +15,7 @@
 ## Hardware split assumed
 
 - ESP sensor board sends values to Pi over USB serial through the Type-C cable.
-- ESP actuator/motor board receives commands from Pi over UART.
+- ESP actuator/motor board receives commands from Pi over USB serial through the Type-C cable.
 - Pi is the master for YOLO, orchestration, and Firebase upload.
 - A4988 is not used directly by Pi. Pi only sends `CMD:CLASSIFY:<0|1|2>`; actuator firmware decides how SG1/SG2/SG3 move.
 
@@ -44,13 +46,13 @@ The Pi code does not drive ESP32 servo pins directly. It sends high-level comman
 
 From the motor-board schematic, SG1/SG2/SG3 appear to be routed as servo outputs. Please verify the net labels before flashing actuator firmware. If the schematic read is correct, use:
 
-| Servo | Intended role | ESP32 pin to verify |
+| Servo | Intended role | ESP32 pin |
 | --- | --- | --- |
-| SG1 | Open/close lid | GPIO32 |
-| SG2 | Select one of 3 bin angles | GPIO26 |
-| SG3 | Rotate/drop receiving tray | GPIO25 |
+| SG1 | Catch/drop tray | GPIO33 |
+| SG2 | Horizontal bin selector | GPIO26 |
+| SG3 | Lid/aux mechanism (continuous or positional) | GPIO25 |
 
-The existing `robot/MCU/esp32_actuator/esp32_actuator.ino` has older servo pins `GPIO5/GPIO18/GPIO21` and stepper sorting logic. For your new flow, keep the same UART commands but remap the firmware implementation to SG1/SG2/SG3.
+Firmware actuator hiện tại đã map đúng các pin trên trong `robot/MCU/esp32_actuator/esp32_actuator.ino`.
 
 ## Serial protocol used by Pi
 
@@ -83,15 +85,18 @@ Pi to actuator ESP:
 
 Actuator ESP to Pi:
 
+- `STATUS:RX:<cmd>` echo lại lệnh vừa nhận.
 - `STATUS:SERVO_OPENED`
 - `STATUS:SERVO_CLOSED`
 - `STATUS:SORTING:<0|1|2>`
 - `STATUS:SORT_DONE`
 - `STATUS:MOVING`
-- `STATUS:ARRIVED`
+- `STATUS:ARRIVED_DUMP`
+- `STATUS:ARRIVED_HOME`
+- `STATUS:ARRIVED` (tương thích ngược, nếu firmware cũ dùng 1 trạng thái chung)
 - `STATUS:LINE_LOST`
 - `STATUS:IDLE`
-- `ACT:<state>,<moving>,<bin>,<line_pos>,<active>,<raw1>,<raw2>,<raw3>,<raw4>,<raw5>,<str1>,<str2>,<str3>,<str4>,<str5>` every 500 ms.
+- `ACT:<state>,<moving>,<bin>,<line_pos>,<active>,<raw1>,<raw2>,<raw3>,<raw4>,<raw5>,<str1>,<str2>,<str3>,<str4>,<str5>` (chỉ xuất hiện khi firmware ESP2 có gửi; trong firmware hiện tại thường gửi khi `CMD:STATUS` hoặc tại các điểm dừng).
 
 ## ROS topics
 
@@ -159,10 +164,10 @@ ros2 launch trash_sorting_ros bringup.launch.py
 ESP32 sensor USB is expected at:
 
 ```bash
-/dev/ttyRobot
+`/dev/serial/by-path/...` (the default in `robot/Pi/trash_sorting_ros/config/pipeline.yaml`).
 ```
 
-Udev rule:
+Optional udev rule (if you prefer stable symlinks):
 
 ```bash
 KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE="0666", SYMLINK+="ttyRobot"
@@ -170,8 +175,8 @@ KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE="0666
 
 For USB connection checks, edit `robot/Pi/trash_sorting_ros/config/pipeline.yaml` only if Linux assigns a different device:
 
-- sensor port: `/dev/ttyRobot`
-- actuator port: `/dev/ttyUSB1`
+- sensor port: `sensor_bridge.ros__parameters.port`
+- actuator port: `actuator_bridge.ros__parameters.port`
 
 If Firebase rules require auth, export:
 

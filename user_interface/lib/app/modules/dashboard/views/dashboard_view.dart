@@ -131,7 +131,7 @@ class DashboardView extends GetView<DashboardController> {
             children: [
               Expanded(
                 child: _BinDetailCard(
-                  label: 'Kim loại',
+                  label: 'Tái chế',
                   index: 1,
                   percent: bin.bin1Percent,
                   temperature: bin.temperature1,
@@ -140,13 +140,13 @@ class DashboardView extends GetView<DashboardController> {
                   mq135: bin.mq135_1,
                   isFull: bin.bin1Full,
                   color: AppColors.binPlastic,
-                  icon: Icons.hardware_outlined,
+                  icon: Icons.recycling_outlined,
                 ),
               ),
               const SizedBox(width: 14),
               Expanded(
                 child: _BinDetailCard(
-                  label: 'Giấy',
+                  label: 'Hữu cơ',
                   index: 2,
                   percent: bin.bin2Percent,
                   temperature: bin.temperature2,
@@ -155,7 +155,7 @@ class DashboardView extends GetView<DashboardController> {
                   mq135: bin.mq135_2,
                   isFull: bin.bin2Full,
                   color: AppColors.binOrganic,
-                  icon: Icons.description_outlined,
+                  icon: Icons.eco_outlined,
                 ),
               ),
               const SizedBox(width: 14),
@@ -190,7 +190,7 @@ class DashboardView extends GetView<DashboardController> {
       delegate: SliverChildListDelegate([
         _sectionLabel('Tình trạng từng ngăn rác'),
         _BinDetailCard(
-          label: 'Kim loại',
+          label: 'Tái chế',
           index: 1,
           percent: bin.bin1Percent,
           temperature: bin.temperature1,
@@ -199,11 +199,11 @@ class DashboardView extends GetView<DashboardController> {
           mq135: bin.mq135_1,
           isFull: bin.bin1Full,
           color: AppColors.binPlastic,
-          icon: Icons.hardware_outlined,
+          icon: Icons.recycling_outlined,
         ),
         const SizedBox(height: 14),
         _BinDetailCard(
-          label: 'Giấy',
+          label: 'Hữu cơ',
           index: 2,
           percent: bin.bin2Percent,
           temperature: bin.temperature2,
@@ -212,7 +212,7 @@ class DashboardView extends GetView<DashboardController> {
           mq135: bin.mq135_2,
           isFull: bin.bin2Full,
           color: AppColors.binOrganic,
-          icon: Icons.description_outlined,
+          icon: Icons.eco_outlined,
         ),
         const SizedBox(height: 14),
         _BinDetailCard(
@@ -312,7 +312,9 @@ class DashboardView extends GetView<DashboardController> {
                       : controller.requestGoDump,
                   icon: const Icon(Icons.local_shipping_outlined, size: 18),
                   label: Text(
-                    bin.isDumping || bin.goDumpRequested
+                    bin.isWaitingAtDump
+                        ? 'Đã tới điểm đổ'
+                        : bin.isDumping || bin.goDumpRequested
                         ? 'Đang đi'
                         : 'Đi đổ rác',
                     style: GoogleFonts.inter(
@@ -361,6 +363,29 @@ class DashboardView extends GetView<DashboardController> {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: controller.requestStop,
+              icon: const Icon(Icons.stop_circle_outlined, size: 18),
+              label: Text(
+                'Dừng',
+                style: GoogleFonts.inter(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.danger,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 13),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            ),
           ),
         ],
       ),
