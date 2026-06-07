@@ -220,3 +220,5 @@ flutter run
 
 - Flash bằng Arduino IDE (hoặc PlatformIO).
 - Monitor Serial `115200`.
+
+hghghg
