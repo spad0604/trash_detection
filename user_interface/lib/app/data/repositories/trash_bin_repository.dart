@@ -69,6 +69,25 @@ class TrashBinRepository {
         .set(ServerValue.timestamp);
   }
 
+  /// Save the phone number used by the Pi SIM module for SMS alerts.
+  Future<void> updateNotificationPhoneNumber(
+    String binId,
+    String phoneNumber,
+  ) async {
+    await _dbRef
+        .child('bins/$binId/notifications/phone_number')
+        .set(phoneNumber.trim());
+  }
+
+  /// Ask the Pi to send an SMS notification through the SIM module.
+  Future<void> requestSendSms(String binId, String type) async {
+    debugPrint('[TrashBinRepository] requestSendSms binId=$binId type=$type');
+    await _dbRef.child('bins/$binId/commands/send_sms').set({
+      'type': type,
+      'requested_at': ServerValue.timestamp,
+    });
+  }
+
   /// Update bin location (from GPS module)
   Future<void> updateLocation(
     String binId,

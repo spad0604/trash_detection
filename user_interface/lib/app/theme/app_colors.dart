@@ -11,16 +11,16 @@ class AppColors {
   static const Color danger = Color(0xFFFF6B6B); // Coral red
   static const Color info = Color(0xFF54A0FF); // Sky blue
 
-  // ── Dark theme surfaces ──────────────────────────────────
-  static const Color background = Color(0xFF0D0F14);
-  static const Color surface = Color(0xFF161A23);
-  static const Color surfaceAlt = Color(0xFF1E2230);
-  static const Color border = Color(0xFF2A2E3B);
+  // ── Light theme surfaces ─────────────────────────────────
+  static const Color background = Color(0xFFEAF0F8);
+  static const Color surface = Color(0xFFFFFFFF);
+  static const Color surfaceAlt = Color(0xFFE2E9F4);
+  static const Color border = Color(0xFFC5D0E0);
 
   // ── Text ─────────────────────────────────────────────────
-  static const Color textPrimary = Color(0xFFF0F1F5);
-  static const Color textSecondary = Color(0xFF8B90A0);
-  static const Color textMuted = Color(0xFF5A5F72);
+  static const Color textPrimary = Color(0xFF172033);
+  static const Color textSecondary = Color(0xFF40506A);
+  static const Color textMuted = Color(0xFF69758B);
 
   // ── Bin-specific colours ─────────────────────────────────
   static const Color binPlastic = Color(0xFF54A0FF); // Metal bin

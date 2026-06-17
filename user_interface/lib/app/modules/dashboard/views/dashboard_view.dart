@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:percent_indicator/circular_percent_indicator.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../../../theme/app_colors.dart';
 import '../controllers/dashboard_controller.dart';
@@ -120,7 +122,7 @@ class DashboardView extends GetView<DashboardController> {
   // ══════════════════════════════════════════════════════════════
   //  WIDE LAYOUT — 3 cards side by side
   // ══════════════════════════════════════════════════════════════
-  SliverToBoxAdapter _buildWideContent(bin) {
+  SliverToBoxAdapter _buildWideContent(dynamic bin) {
     return SliverToBoxAdapter(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -177,6 +179,9 @@ class DashboardView extends GetView<DashboardController> {
           ),
           const SizedBox(height: 16),
           _buildSystemStatusCard(bin),
+          const SizedBox(height: 16),
+          _sectionLabel('Vị trí Robot'),
+          _buildMapCard(bin),
         ],
       ),
     );
@@ -185,7 +190,7 @@ class DashboardView extends GetView<DashboardController> {
   // ══════════════════════════════════════════════════════════════
   //  NARROW LAYOUT — stacked cards
   // ══════════════════════════════════════════════════════════════
-  SliverList _buildNarrowContent(bin) {
+  SliverList _buildNarrowContent(dynamic bin) {
     return SliverList(
       delegate: SliverChildListDelegate([
         _sectionLabel('Tình trạng từng ngăn rác'),
@@ -229,6 +234,9 @@ class DashboardView extends GetView<DashboardController> {
         ),
         const SizedBox(height: 16),
         _buildSystemStatusCard(bin),
+        const SizedBox(height: 16),
+        _sectionLabel('Vị trí Robot'),
+        _buildMapCard(bin),
         const SizedBox(height: 32),
       ]),
     );
@@ -237,14 +245,21 @@ class DashboardView extends GetView<DashboardController> {
   // ══════════════════════════════════════════════════════════════
   //  SYSTEM STATUS CARD (global info)
   // ══════════════════════════════════════════════════════════════
-  Widget _buildSystemStatusCard(bin) {
+  Widget _buildSystemStatusCard(dynamic bin) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.border),
+        border: Border.all(color: AppColors.border, width: 1.3),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF22324A).withOpacity(0.08),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -387,6 +402,180 @@ class DashboardView extends GetView<DashboardController> {
               ),
             ),
           ),
+          const SizedBox(height: 18),
+          TextField(
+            controller: controller.smsPhoneController,
+            keyboardType: TextInputType.phone,
+            decoration: InputDecoration(
+              labelText: 'Số điện thoại nhận SMS',
+              hintText: 'VD: 0982097315',
+              prefixIcon: const Icon(Icons.phone_android_rounded, size: 18),
+              suffixIcon: IconButton(
+                tooltip: 'Lưu số điện thoại',
+                onPressed: controller.saveNotificationPhoneNumber,
+                icon: const Icon(Icons.save_outlined, size: 18),
+              ),
+              filled: true,
+              fillColor: AppColors.surfaceAlt,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.border),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.border),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.primary),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => controller.requestSendSms('full'),
+                  icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                  label: Text(
+                    'Báo rác đầy',
+                    style: GoogleFonts.inter(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.warning,
+                    side: const BorderSide(color: AppColors.warning),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => controller.requestSendSms('fire'),
+                  icon: const Icon(
+                    Icons.local_fire_department_outlined,
+                    size: 18,
+                  ),
+                  label: Text(
+                    'Báo cháy',
+                    style: GoogleFonts.inter(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.danger,
+                    side: const BorderSide(color: AppColors.danger),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  //  MAP LOCATION CARD
+  // ══════════════════════════════════════════════════════════════
+  Widget _buildMapCard(dynamic bin) {
+    // Toạ độ giả định (Hà Nội)
+    final LatLng robotLocation = const LatLng(21.0151391, 105.8351388);
+
+    return Container(
+      width: double.infinity,
+      height: 250,
+      clipBehavior: Clip.hardEdge,
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border, width: 1.3),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF22324A).withOpacity(0.08),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Stack(
+        children: [
+          FlutterMap(
+            options: MapOptions(
+              initialCenter: robotLocation,
+              initialZoom: 17.8,
+              interactionOptions: const InteractionOptions(
+                flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+              ),
+            ),
+            children: [
+              TileLayer(
+                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                userAgentPackageName: 'com.example.app',
+              ),
+              MarkerLayer(
+                markers: [
+                  Marker(
+                    point: robotLocation,
+                    width: 40,
+                    height: 40,
+                    child: const Icon(
+                      Icons.location_on,
+                      color: AppColors.danger,
+                      size: 40,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          Positioned(
+            top: 12,
+            left: 12,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: AppColors.surface.withOpacity(0.85),
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 4,
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.gps_fixed,
+                    size: 16,
+                    color: AppColors.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Vị trí hiện tại',
+                    style: GoogleFonts.inter(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -492,9 +681,16 @@ class _BinDetailCard extends StatelessWidget {
         border: Border.all(
           color: isFull
               ? AppColors.danger.withOpacity(0.5)
-              : color.withOpacity(0.25),
-          width: isFull ? 1.5 : 1,
+              : color.withOpacity(0.42),
+          width: isFull ? 1.7 : 1.3,
         ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF22324A).withOpacity(0.08),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -720,7 +916,7 @@ class _InfoChip extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.surfaceAlt,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
+        border: Border.all(color: AppColors.border, width: 1.2),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,

@@ -6,9 +6,8 @@ sensor_bridge:
     read_timeout: 0.2
     reconnect_delay: 2.0
     poll_interval: 3.0
-    # Most IR obstacle modules are active-low. Set to 1 if your module outputs
-    # HIGH when an object is present.
-    ir_detected_state: 0
+    # IR module is active-low: 0 means object detected, 1 means clear.
+    ir_detected_state: "0"
 
 actuator_bridge:
   ros__parameters:
@@ -20,11 +19,13 @@ actuator_bridge:
 
 trash_orchestrator:
   ros__parameters:
-    lid_open_seconds: 3.0
-    capture_delay_seconds: 0.8
+    # Delay after opening the lid before asking the camera to capture.
+    capture_delay_seconds: 5.0
+    # Fallback timeout to close the lid even if the camera node never reports back.
+    capture_timeout_seconds: 5.0
     sort_timeout_seconds: 12.0
     led_on_seconds: 3.0
-    full_threshold_percent: 95
+    full_threshold_percent: 90
     # Circular-line navigation: CMD:MOVE_START goes to the dump marker,
     # CMD:MOVE_HOME continues forward to the next home marker.
     full_bin_move_command: CMD:MOVE_START
@@ -41,7 +42,7 @@ yolo_classifier:
     image_height: 480
     camera_warmup_frames: 20
     camera_warmup_delay_seconds: 0.05
-    confidence_threshold: 0.25
+    confidence_threshold: 0.5
     fallback_bin: 2
     debug_image_dir: '/home/giap/trash_ws/debug_images'
     # YOLO waste classes: BIODEGRADABLE, CARDBOARD, GLASS, METAL, PAPER, PLASTIC.
@@ -54,6 +55,9 @@ firebase_bridge:
     bin_id: bin_001
     # Can also be supplied by FIREBASE_AUTH_TOKEN.
     auth_token: ''
-    full_threshold_percent: 95
+    full_threshold_percent: 90
     http_timeout_seconds: 3.0
     command_poll_interval_seconds: 1.0
+    sms_serial_port: /dev/serial0
+    sms_baudrate: 115200
+    sms_alert_cooldown_seconds: 300.0

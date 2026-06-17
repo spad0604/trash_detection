@@ -176,6 +176,12 @@ float cleanDhtValue(float value) {
   return isnan(value) ? -1.0f : value;
 }
 
+int cleanAdcValueMaxToZero(int value) {
+  // ESP32 ADC 12-bit max is 4095. Some MQ modules can saturate at max (or float)
+  // which is not useful as a sensor value in our pipeline.
+  return (value >= 4095) ? 0 : value;
+}
+
 void readAllSensors() {
   sensorData.temp[0] = cleanDhtValue(dht1.readTemperature());
   sensorData.hum[0] = cleanDhtValue(dht1.readHumidity());
@@ -184,13 +190,13 @@ void readAllSensors() {
   sensorData.temp[2] = cleanDhtValue(dht3.readTemperature());
   sensorData.hum[2] = cleanDhtValue(dht3.readHumidity());
 
-  sensorData.mq2[0] = analogRead(MQ2_1_PIN);
-  sensorData.mq2[1] = analogRead(MQ2_2_PIN);
-  sensorData.mq2[2] = analogRead(MQ2_3_PIN);
+  sensorData.mq2[0] = cleanAdcValueMaxToZero(analogRead(MQ2_1_PIN));
+  sensorData.mq2[1] = cleanAdcValueMaxToZero(analogRead(MQ2_2_PIN));
+  sensorData.mq2[2] = cleanAdcValueMaxToZero(analogRead(MQ2_3_PIN));
 
-  sensorData.mq135[0] = analogRead(MQ135_1_PIN);
-  sensorData.mq135[1] = analogRead(MQ135_2_PIN);
-  sensorData.mq135[2] = analogRead(MQ135_3_PIN);
+  sensorData.mq135[0] = cleanAdcValueMaxToZero(analogRead(MQ135_1_PIN));
+  sensorData.mq135[1] = cleanAdcValueMaxToZero(analogRead(MQ135_2_PIN));
+  sensorData.mq135[2] = cleanAdcValueMaxToZero(analogRead(MQ135_3_PIN));
 
   sensorData.level[0] = calcFillPercent(readUltrasonicCm(US1_TRIG_PIN, US1_ECHO_PIN));
   sensorData.level[1] = calcFillPercent(readUltrasonicCm(US2_TRIG_PIN, US2_ECHO_PIN));

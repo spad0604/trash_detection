@@ -1,5 +1,5 @@
+import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import 'package:flutter/foundation.dart';
 import '../../../data/models/trash_bin_model.dart';
 import '../../../data/repositories/trash_bin_repository.dart';
 
@@ -10,6 +10,7 @@ class DashboardController extends GetxController {
   final RxList<TrashBinModel> allBins = <TrashBinModel>[].obs;
   final RxBool isLoading = true.obs;
   final RxString selectedBinId = 'bin_001'.obs;
+  final TextEditingController smsPhoneController = TextEditingController();
 
   @override
   void onInit() {
@@ -24,10 +25,14 @@ class DashboardController extends GetxController {
         .listen(
           (bin) {
             currentBin.value = bin;
+            if (smsPhoneController.text.trim().isEmpty &&
+                bin.notificationPhoneNumber.isNotEmpty) {
+              smsPhoneController.text = bin.notificationPhoneNumber;
+            }
             isLoading.value = false;
           },
           onError: (e) {
-            print('[Dashboard] Stream error: $e');
+            debugPrint('[Dashboard] Stream error: $e');
             isLoading.value = false;
           },
         );
@@ -93,6 +98,39 @@ class DashboardController extends GetxController {
       Get.snackbar('Firebase error', e.toString());
       rethrow;
     }
+  }
+
+  Future<void> saveNotificationPhoneNumber() async {
+    try {
+      final phone = smsPhoneController.text.trim();
+      await _repository.updateNotificationPhoneNumber(
+        selectedBinId.value,
+        phone,
+      );
+      Get.snackbar('SMS', 'Da luu so dien thoai nhan tin');
+    } catch (e) {
+      debugPrint('[DashboardController] saveNotificationPhoneNumber error: $e');
+      Get.snackbar('Firebase error', e.toString());
+      rethrow;
+    }
+  }
+
+  Future<void> requestSendSms(String type) async {
+    try {
+      await saveNotificationPhoneNumber();
+      await _repository.requestSendSms(selectedBinId.value, type);
+      Get.snackbar('SMS', 'Da gui yeu cau nhan tin');
+    } catch (e) {
+      debugPrint('[DashboardController] requestSendSms error: $e');
+      Get.snackbar('Firebase error', e.toString());
+      rethrow;
+    }
+  }
+
+  @override
+  void onClose() {
+    smsPhoneController.dispose();
+    super.onClose();
   }
 
   // ── Computed getters for UI ─────────────────────────────

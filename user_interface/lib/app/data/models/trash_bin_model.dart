@@ -29,6 +29,7 @@ class TrashBinModel {
   final bool bin3Full;
   final bool goDumpRequested;
   final bool goHomeRequested;
+  final String notificationPhoneNumber;
   final int? lastUpdate;
 
   TrashBinModel({
@@ -62,6 +63,7 @@ class TrashBinModel {
     this.bin3Full = false,
     this.goDumpRequested = false,
     this.goHomeRequested = false,
+    this.notificationPhoneNumber = '',
     this.lastUpdate,
   });
 
@@ -73,6 +75,7 @@ class TrashBinModel {
     final location = map['location'] as Map<dynamic, dynamic>? ?? {};
     final alerts = map['alerts'] as Map<dynamic, dynamic>? ?? {};
     final commands = map['commands'] as Map<dynamic, dynamic>? ?? {};
+    final notifications = map['notifications'] as Map<dynamic, dynamic>? ?? {};
 
     return TrashBinModel(
       id: id,
@@ -105,6 +108,7 @@ class TrashBinModel {
       bin3Full: (alerts['bin3_full'] as bool?) ?? false,
       goDumpRequested: (commands['go_dump'] as bool?) ?? false,
       goHomeRequested: (commands['go_home'] as bool?) ?? false,
+      notificationPhoneNumber: (notifications['phone_number'] as String?) ?? '',
       lastUpdate: (status['last_update'] as num?)?.toInt(),
     );
   }
@@ -121,6 +125,7 @@ class TrashBinModel {
       state == 'dump_outbound' ||
       state == 'home_requested' ||
       state == 'dump_returning';
-  bool get isWaitingAtDump => state == 'awaiting_return' || state == 'dump_completed';
+  bool get isWaitingAtDump =>
+      state == 'awaiting_return' || state == 'dump_completed';
   bool get isHomeCompleted => state == 'home_completed';
 }

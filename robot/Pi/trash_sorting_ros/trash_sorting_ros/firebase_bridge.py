@@ -16,6 +16,11 @@ try:
 except ImportError:  # pragma: no cover - handled at runtime on the Pi
     requests = None
 
+try:
+    import serial
+except ImportError:  # pragma: no cover - handled at runtime on the Pi
+    serial = None
+
 
 class FirebaseBridge(Node):
     def __init__(self) -> None:
@@ -26,9 +31,12 @@ class FirebaseBridge(Node):
         )
         self.declare_parameter("bin_id", "bin_001")
         self.declare_parameter("auth_token", os.getenv("FIREBASE_AUTH_TOKEN", ""))
-        self.declare_parameter("full_threshold_percent", 95)
+        self.declare_parameter("full_threshold_percent", 90)
         self.declare_parameter("http_timeout_seconds", 3.0)
         self.declare_parameter("command_poll_interval_seconds", 1.0)
+        self.declare_parameter("sms_serial_port", "/dev/serial0")
+        self.declare_parameter("sms_baudrate", 115200)
+        self.declare_parameter("sms_alert_cooldown_seconds", 300.0)
 
         self.create_subscription(String, "/trash_bin/sensors", self._on_sensors, 10)
         self.create_subscription(Int32MultiArray, "/trash_bin/levels", self._on_levels, 10)
@@ -44,9 +52,12 @@ class FirebaseBridge(Node):
             self._poll_commands,
         )
         self._state = "offline"
+        self._last_auto_sms_at: Dict[str, float] = {}
 
         if requests is None:
             self.get_logger().warn("requests is not installed; Firebase bridge is disabled")
+        if serial is None:
+            self.get_logger().warn("pyserial is not installed; SMS sending is disabled")
 
     def _on_sensors(self, msg: String) -> None:
         try:
@@ -100,8 +111,10 @@ class FirebaseBridge(Node):
         patch = {"status": {"last_update": self._now_ms()}}
         if alert == "fire":
             patch["alerts"] = {"fire_risk": True}
+            self._send_alert_sms("fire")
         elif alert == "gas":
             patch["alerts"] = {"gas_leak": True}
+            self._send_alert_sms("gas")
         else:
             patch["alerts"] = {alert: True}
         self._patch_bin(patch)
@@ -251,6 +264,16 @@ class FirebaseBridge(Node):
                 else:
                     self.get_logger().warn(f"ignored go_home command while state={self._state}")
                     self._patch_bin({"commands": {"go_home": False}})
+
+            sms_response = requests.get(self._json_url("commands/send_sms"), timeout=timeout)
+            if sms_response.status_code >= 300:
+                self.get_logger().warn(
+                    f"Firebase command GET failed {sms_response.status_code}: {sms_response.text[:160]}"
+                )
+                return
+            sms_command = sms_response.json()
+            if sms_command:
+                self._handle_manual_sms_command(sms_command)
         except Exception as exc:
             self.get_logger().warn(f"Firebase command poll error: {exc}")
 
@@ -273,6 +296,120 @@ class FirebaseBridge(Node):
             return 0
         value = max(10.0, min(12.6, float(voltage)))
         return int(round((value - 10.0) / (12.6 - 10.0) * 100))
+
+    def _send_alert_sms(self, alert_type: str) -> None:
+        cooldown = max(0.0, float(self.get_parameter("sms_alert_cooldown_seconds").value))
+        now = time.time()
+        if now - self._last_auto_sms_at.get(alert_type, 0.0) < cooldown:
+            return
+        self._last_auto_sms_at[alert_type] = now
+        message = self._sms_message(alert_type, manual=False)
+        self._send_sms_to_configured_phone(message, f"auto_{alert_type}")
+
+    def _handle_manual_sms_command(self, command: Any) -> None:
+        if command is True:
+            sms_type = "status"
+        elif isinstance(command, str):
+            sms_type = command.strip().lower() or "status"
+        elif isinstance(command, dict):
+            sms_type = str(command.get("type", "status")).strip().lower()
+        else:
+            sms_type = "status"
+
+        message = self._sms_message(sms_type, manual=True)
+        self._send_sms_to_configured_phone(message, f"manual_{sms_type}")
+        self._patch_bin({"commands": {"send_sms": False, "last_sms_request": self._now_ms()}})
+
+    def _send_sms_to_configured_phone(self, message: str, reason: str) -> bool:
+        phone = self._get_notification_phone()
+        if not phone:
+            self.get_logger().warn(f"cannot send SMS for {reason}: notifications/phone_number is empty")
+            self._patch_bin(
+                {
+                    "notifications": {
+                        "sms_last_status": "missing_phone",
+                        "sms_last_reason": reason,
+                        "sms_last_update": self._now_ms(),
+                    }
+                }
+            )
+            return False
+
+        ok = self._send_sms(phone, message)
+        self._patch_bin(
+            {
+                "notifications": {
+                    "sms_last_status": "sent" if ok else "failed",
+                    "sms_last_reason": reason,
+                    "sms_last_message": message,
+                    "sms_last_sent_at": self._now_ms() if ok else None,
+                    "sms_last_update": self._now_ms(),
+                }
+            }
+        )
+        return ok
+
+    def _get_notification_phone(self) -> str:
+        if requests is None:
+            return ""
+        try:
+            timeout = float(self.get_parameter("http_timeout_seconds").value)
+            response = requests.get(self._json_url("notifications/phone_number"), timeout=timeout)
+            if response.status_code >= 300:
+                self.get_logger().warn(
+                    f"Firebase phone GET failed {response.status_code}: {response.text[:160]}"
+                )
+                return ""
+            return self._normalize_phone(response.json())
+        except Exception as exc:
+            self.get_logger().warn(f"Firebase phone GET error: {exc}")
+            return ""
+
+    @staticmethod
+    def _normalize_phone(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if text.startswith("+"):
+            return "+" + "".join(ch for ch in text[1:] if ch.isdigit())
+        return "".join(ch for ch in text if ch.isdigit())
+
+    def _send_sms(self, phone: str, message: str) -> bool:
+        if serial is None:
+            return False
+        port = str(self.get_parameter("sms_serial_port").value)
+        baudrate = int(self.get_parameter("sms_baudrate").value)
+        try:
+            with serial.Serial(port, baudrate, timeout=1, write_timeout=2) as modem:
+                time.sleep(0.2)
+                self._write_at(modem, "AT")
+                self._write_at(modem, "AT+CMGF=1")
+                self._write_at(modem, 'AT+CSCS="GSM"')
+                self._write_at(modem, f'AT+CMGS="{phone}"')
+                modem.write(message.encode("ascii", errors="replace") + b"\x1A")
+                modem.flush()
+                time.sleep(4.0)
+            self.get_logger().info(f"sent SMS to {phone}: {message}")
+            return True
+        except Exception as exc:
+            self.get_logger().warn(f"SMS send failed on {port}: {exc}")
+            return False
+
+    @staticmethod
+    def _write_at(modem: Any, command: str) -> None:
+        modem.write((command + "\r").encode("ascii"))
+        modem.flush()
+        time.sleep(0.4)
+
+    def _sms_message(self, sms_type: str, manual: bool) -> str:
+        prefix = "Thong bao thu cong" if manual else "Canh bao tu dong"
+        if sms_type == "fire":
+            return f"{prefix}: Phat hien nguy co chay tai thung rac thong minh."
+        if sms_type == "gas":
+            return f"{prefix}: Phat hien ro ri khi gas tai thung rac thong minh."
+        if sms_type == "full":
+            return f"{prefix}: Mot hoac nhieu ngan rac da day, can di do rac."
+        return f"{prefix}: He thong thung rac thong minh can duoc kiem tra."
 
     def _patch_bin(self, payload: Dict[str, Any]) -> None:
         if requests is None:

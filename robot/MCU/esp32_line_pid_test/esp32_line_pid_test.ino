@@ -2,13 +2,14 @@
  * ESP32 line PID test sketch
  *
  * Hardware mapping:
- *   Line sensors, left -> right: 36, 39, 34, 35, 32
+ *   Line sensors, old front left -> right: 36, 39, 34, 35, 32
+ *   Rear-as-front logical left -> right: 32, 35, 34, 39, 36
  *   Left motor L298N: 23 (IN1), 22 (IN2)
  *   Right motor L298N: 19 (IN3), 21 (IN4)
  *
  * Serial commands:
  *   r -> start from the start marker and run forward to the end marker
- *   z -> continue forward on the circular line to the home marker
+ *   z -> emergency stop
  *
  * The robot is expected to begin on a 5-sensor black marker. The first fully
  * covered marker is treated as the start zone, and the next fully covered
@@ -27,29 +28,38 @@ static const bool LEFT_REVERSED = false;
 static const bool RIGHT_REVERSED = false;
 
 static const int LINE_PINS[5] = {36, 39, 34, 35, 32};
+static const int LINE_READ_ORDER[5] = {4, 3, 2, 1, 0};
 static const int LINE_WEIGHTS[5] = {-2000, -1000, 0, 1000, 2000};
+static const int DRIVE_DIRECTION = 1;
 
 static const uint32_t BAUD = 115200;
 static const int PWM_FREQ = 5000;
 static const int PWM_RESOLUTION = 8;
 static const int PWM_MAX = 255;
 
-static const int START_CLEAR_SPEED = 150;
-static const int BASE_SPEED = 170;
-static const int MIN_RUN_SPEED = 55;
-static const int MAX_SPEED = 185;
-static const int TURN_SLOW_SPEED = 55;
+static const int START_CLEAR_SPEED = 225;
+static const int BASE_SPEED = 255;
+static const int MIN_RUN_SPEED = 0;
+static const int MAX_SPEED = 255;
+static const int TURN_SLOW_SPEED = 0;
+static const int EDGE_PULL_SPEED = PWM_MAX;
+static const int EDGE_REVERSE_SPEED = 150;
+static const int HARD_TURN_POSITION = 150;
 
 static const int ENDPOINT_MIN_ACTIVE = 3;
 static const unsigned long START_IGNORE_MS = 1000;
 static const unsigned long LOST_BRIDGE_MS = 120;
+static const unsigned long EDGE_PULL_MEMORY_MS = 900;
+static const unsigned long LOST_SEARCH_MS = 550;
 static const unsigned long TELEMETRY_MS = 250;
+static const unsigned long BRAKE_MS = 120;
+static const int LOST_SEARCH_SPEED = 160;
 
 static int blackCal[5] = {0, 0, 0, 0, 0};
 static int whiteCal[5] = {4095, 4095, 4095, 4095, 4095};
 static int detectThreshold = 200;
 
-static float kp = 0.060f;
+static float kp = 0.120f;
 static float ki = 0.000f;
 static float kd = 0.120f;
 
@@ -78,6 +88,8 @@ unsigned long lastTelemetryMs = 0;
 unsigned long testStartMs = 0;
 long lastSeenPosition = 0;
 int lastSearchDir = 1;
+int lastEdgeDir = 0;
+unsigned long lastEdgeSeenMs = 0;
 int lastLeftMagnitude = 105;
 int lastRightMagnitude = 105;
 
@@ -113,8 +125,9 @@ LineRead readLineSensors() {
   long strengthSum = 0;
 
   for (int i = 0; i < 5; i++) {
-    int value = analogRead(LINE_PINS[i]);
-    int strength = normalizedLineStrength(i, value);
+    int physicalIndex = LINE_READ_ORDER[i];
+    int value = analogRead(LINE_PINS[physicalIndex]);
+    int strength = normalizedLineStrength(physicalIndex, value);
     line.raw[i] = value;
     line.strength[i] = strength;
     line.active[i] = (strength >= detectThreshold);
@@ -149,6 +162,9 @@ void driveMotor(int forwardPin, int backwardPin, int speed) {
 }
 
 void setMotorSpeeds(int leftSpeed, int rightSpeed) {
+  leftSpeed *= DRIVE_DIRECTION;
+  rightSpeed *= DRIVE_DIRECTION;
+
   if (LEFT_REVERSED) {
     leftSpeed = -leftSpeed;
   }
@@ -167,6 +183,15 @@ void stopMotors() {
   ledcWrite(RIGHT_BACKWARD_PIN, 0);
 }
 
+void brakeMotors() {
+  ledcWrite(LEFT_FORWARD_PIN, PWM_MAX);
+  ledcWrite(LEFT_BACKWARD_PIN, PWM_MAX);
+  ledcWrite(RIGHT_FORWARD_PIN, PWM_MAX);
+  ledcWrite(RIGHT_BACKWARD_PIN, PWM_MAX);
+  delay(BRAKE_MS);
+  stopMotors();
+}
+
 void driveStraightSigned(int speedMagnitude) {
   int magnitude = clampMagnitude(speedMagnitude);
   setMotorSpeeds(magnitude, magnitude);
@@ -180,8 +205,16 @@ void drivePidSpeeds(int leftMagnitude, int rightMagnitude) {
   setMotorSpeeds(leftMagnitude, rightMagnitude);
 }
 
+void driveEdgePull(int edgeDir) {
+  if (edgeDir < 0) {
+    setMotorSpeeds(EDGE_PULL_SPEED, -EDGE_REVERSE_SPEED);
+  } else if (edgeDir > 0) {
+    setMotorSpeeds(-EDGE_REVERSE_SPEED, EDGE_PULL_SPEED);
+  }
+}
+
 void stopAndReport(const char *statusLine) {
-  stopMotors();
+  brakeMotors();
   moving = false;
   state = IDLE;
   endpointArmed = true;
@@ -189,6 +222,18 @@ void stopAndReport(const char *statusLine) {
   pidLastError = 0.0f;
   lineLostSinceMs = 0;
   PI_SERIAL.println(statusLine);
+  sendTelemetry();
+}
+
+void emergencyStop() {
+  brakeMotors();
+  moving = false;
+  state = IDLE;
+  endpointArmed = true;
+  pidIntegral = 0.0f;
+  pidLastError = 0.0f;
+  lineLostSinceMs = 0;
+  PI_SERIAL.println("STATUS:EMERGENCY_STOP");
   sendTelemetry();
 }
 
@@ -228,6 +273,8 @@ void startTest(bool backward) {
   pidIntegral = 0.0f;
   pidLastError = 0.0f;
   lastSearchDir = 1;
+  lastEdgeDir = 0;
+  lastEdgeSeenMs = 0;
   PI_SERIAL.println(backward ? "STATUS:RUN_HOME" : "STATUS:RUN_FORWARD");
   sendTelemetry();
 }
@@ -301,10 +348,14 @@ void followVisibleLine(const LineRead &line) {
   lineLostSinceMs = 0;
   lastSeenPosition = line.position;
 
-  if (line.position < -150) {
+  if (line.position < -HARD_TURN_POSITION) {
     lastSearchDir = -1;
-  } else if (line.position > 150) {
+    lastEdgeDir = -1;
+    lastEdgeSeenMs = millis();
+  } else if (line.position > HARD_TURN_POSITION) {
     lastSearchDir = 1;
+    lastEdgeDir = 1;
+    lastEdgeSeenMs = millis();
   }
 
   float error = (float)line.position;
@@ -319,12 +370,12 @@ void followVisibleLine(const LineRead &line) {
   int leftMagnitude = BASE_SPEED - correction;
   int rightMagnitude = BASE_SPEED + correction;
 
-  if (line.position < -500) {
-    leftMagnitude = TURN_SLOW_SPEED;
-    rightMagnitude = BASE_SPEED;
-  } else if (line.position > 500) {
-    leftMagnitude = BASE_SPEED;
-    rightMagnitude = TURN_SLOW_SPEED;
+  if (line.position < -HARD_TURN_POSITION) {
+    driveEdgePull(-1);
+    return;
+  } else if (line.position > HARD_TURN_POSITION) {
+    driveEdgePull(1);
+    return;
   }
 
   drivePidSpeeds(leftMagnitude, rightMagnitude);
@@ -342,7 +393,21 @@ void recoverLostLine() {
     return;
   }
 
-  stopMotors();
+  if (lastEdgeDir != 0 && nowMs - lastEdgeSeenMs <= EDGE_PULL_MEMORY_MS) {
+    driveEdgePull(lastEdgeDir);
+    return;
+  }
+
+  if (lostMs <= LOST_BRIDGE_MS + LOST_SEARCH_MS) {
+    if (lastSearchDir < 0) {
+      setMotorSpeeds(-LOST_SEARCH_SPEED, LOST_SEARCH_SPEED);
+    } else {
+      setMotorSpeeds(LOST_SEARCH_SPEED, -LOST_SEARCH_SPEED);
+    }
+    return;
+  }
+
+  brakeMotors();
   moving = false;
   state = LINE_LOST;
   endpointArmed = true;
@@ -381,7 +446,7 @@ void handleCommands() {
     if (cmd == "r" || cmd == "R") {
       startTest(false);
     } else if (cmd == "z" || cmd == "Z") {
-      startTest(true);
+      emergencyStop();
     }
   }
 }

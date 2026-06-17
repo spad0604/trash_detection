@@ -34,10 +34,12 @@ class YoloClassifier(Node):
         )
 
         self.publisher = self.create_publisher(String, "/trash_bin/classification", 10)
+        self.capture_status_pub = self.create_publisher(String, "/trash_bin/capture_status", 10)
         self.create_subscription(Empty, "/trash_bin/classify_request", self._on_request, 10)
         self._model = None
 
     def _on_request(self, _: Empty) -> None:
+        self._publish_capture_status("capturing")
         result = self._classify()
         self.publisher.publish(String(data=json.dumps(result, separators=(",", ":"), ensure_ascii=True)))
 
@@ -45,7 +47,9 @@ class YoloClassifier(Node):
         frame = self._capture_frame()
         model_path = self._resolve_model_path(str(self.get_parameter("model_path").value))
         if frame is None:
+            self._publish_capture_status("capture_failed")
             return self._fallback("camera_unavailable")
+        self._publish_capture_status("captured")
         if not model_path:
             return self._fallback("model_path_not_configured")
 
@@ -308,6 +312,9 @@ class YoloClassifier(Node):
         timestamp_path = debug_dir / f"{prefix}_{int(time.time())}.jpg"
         cv2.imwrite(str(latest_path), image)
         cv2.imwrite(str(timestamp_path), image)
+
+    def _publish_capture_status(self, status: str) -> None:
+        self.capture_status_pub.publish(String(data=status))
 
 
 def main() -> None:

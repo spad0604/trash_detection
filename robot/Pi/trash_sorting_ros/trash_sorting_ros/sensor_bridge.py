@@ -27,9 +27,11 @@ class SensorBridge(Node):
         self.declare_parameter("read_timeout", 0.2)
         self.declare_parameter("reconnect_delay", 2.0)
         self.declare_parameter("poll_interval", 3.0)
-        self.declare_parameter("ir_detected_state", 0)
+        self.declare_parameter("ir_detected_state", "0")
 
-        self.ir_detected_state = int(self.get_parameter("ir_detected_state").value)
+        ir_param = str(self.get_parameter("ir_detected_state").value).strip().lower()
+        self.detect_any_ir_signal = ir_param in {"any", "*", "all"}
+        self.ir_detected_state = 0 if self.detect_any_ir_signal else int(ir_param)
         self._last_ir: Optional[bool] = None
         self._last_poll = 0.0
 
@@ -79,6 +81,7 @@ class SensorBridge(Node):
             if line.startswith("SENSOR:"):
                 data = parse_sensor_payload(line.removeprefix("SENSOR:"))
                 self.sensor_pub.publish(String(data=json_dumps(data)))
+                self._publish_levels_from_sensor(data)
                 if "ir_state" in data:
                     self._publish_ir(int(data["ir_state"]))
             elif line.startswith("LEVELS:"):
@@ -99,11 +102,22 @@ class SensorBridge(Node):
             self.get_logger().warn(f"cannot parse sensor line {line!r}: {exc}")
 
     def _publish_ir(self, state: int) -> None:
+        if self.detect_any_ir_signal:
+            self.object_pub.publish(Bool(data=True))
+            return
+
         detected = state == self.ir_detected_state
         if self._last_ir is detected:
             return
         self._last_ir = detected
         self.object_pub.publish(Bool(data=detected))
+
+    def _publish_levels_from_sensor(self, data: dict) -> None:
+        keys = ("bin1_percent", "bin2_percent", "bin3_percent")
+        if not all(key in data for key in keys):
+            return
+        levels = [int(data[key]) for key in keys]
+        self.levels_pub.publish(Int32MultiArray(data=levels))
 
 
 def main() -> None:
