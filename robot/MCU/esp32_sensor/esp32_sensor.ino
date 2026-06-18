@@ -55,16 +55,20 @@ static const int VBAT_PIN = 35;
 static const float VBAT_R1 = 10000.0f;
 static const float VBAT_R2 = 3000.0f;
 
+static const int BUZZER_PIN = 22;
+
 static const uint32_t USB_SERIAL_BAUD = 115200;
 #define PI_SERIAL Serial
 
 static const float TEMP_FIRE_THRESHOLD = 60.0f;
 static const int MQ2_SMOKE_THRESHOLD = 800;
 static const int MQ135_GAS_THRESHOLD = 700;
+static const int BIN_FULL_THRESHOLD = 90;
 static const float BIN_HEIGHT_CM = 18.0f;
 
 static const unsigned long SENSOR_INTERVAL_MS = 3000;
 static const unsigned long IR_POLL_INTERVAL_MS = 50;
+static const unsigned long IR_DETECTED_REPEAT_MS = 300;
 static const unsigned long ALERT_INTERVAL_MS = 5000;
 
 DHT dht1(DHT1_PIN, DHT_TYPE);
@@ -85,6 +89,7 @@ SensorData sensorData;
 
 unsigned long lastSensorRead = 0;
 unsigned long lastIrPoll = 0;
+unsigned long lastDetectedIrSent = 0;
 unsigned long lastFireAlert = 0;
 unsigned long lastGasAlert = 0;
 int lastSentIrState = -1;
@@ -110,6 +115,8 @@ void setup() {
   dht3.begin();
 
   pinMode(IR_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 
   analogReadResolution(12);
   setupAnalogPin(MQ2_1_PIN);
@@ -218,10 +225,17 @@ void pollIr() {
 }
 
 void sendIrToPi(bool force) {
-  if (!force && sensorData.irState == lastSentIrState) {
+  unsigned long now = millis();
+  bool detected = sensorData.irState == 0;
+  bool repeatDetected = detected && (now - lastDetectedIrSent >= IR_DETECTED_REPEAT_MS);
+
+  if (!force && sensorData.irState == lastSentIrState && !repeatDetected) {
     return;
   }
   lastSentIrState = sensorData.irState;
+  if (detected) {
+    lastDetectedIrSent = now;
+  }
 
   char buf[16];
   snprintf(buf, sizeof(buf), "IR:%d", sensorData.irState);
@@ -233,6 +247,7 @@ void checkAlerts() {
 
   bool fireRisk = false;
   bool gasRisk = false;
+  bool binFull = false;
   for (int i = 0; i < 3; i++) {
     if (sensorData.temp[i] > TEMP_FIRE_THRESHOLD || sensorData.mq2[i] > MQ2_SMOKE_THRESHOLD) {
       fireRisk = true;
@@ -240,7 +255,12 @@ void checkAlerts() {
     if (sensorData.mq135[i] > MQ135_GAS_THRESHOLD) {
       gasRisk = true;
     }
+    if (sensorData.level[i] >= BIN_FULL_THRESHOLD) {
+      binFull = true;
+    }
   }
+
+  digitalWrite(BUZZER_PIN, (fireRisk || binFull) ? HIGH : LOW);
 
   if (fireRisk && now - lastFireAlert >= ALERT_INTERVAL_MS) {
     lastFireAlert = now;

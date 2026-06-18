@@ -103,13 +103,13 @@ class SensorBridge(Node):
 
     def _publish_ir(self, state: int) -> None:
         if self.detect_any_ir_signal:
+            self.get_logger().info(f"IR signal received: state={state}; publishing object_detected=True")
             self.object_pub.publish(Bool(data=True))
             return
 
         detected = state == self.ir_detected_state
-        if self._last_ir is detected:
-            return
         self._last_ir = detected
+        self.get_logger().info(f"IR signal received: state={state}, detected={detected}")
         self.object_pub.publish(Bool(data=detected))
 
     def _publish_levels_from_sensor(self, data: dict) -> None:

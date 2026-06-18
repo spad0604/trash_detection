@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Callable, List
 
 import rclpy
@@ -18,6 +19,11 @@ class TrashOrchestrator(Node):
         self.declare_parameter("led_on_seconds", 3.0)
         self.declare_parameter("full_threshold_percent", 90)
         self.declare_parameter("full_bin_move_command", "CMD:MOVE_START")
+        self.declare_parameter("navigation_min_seconds_before_stale_arrival", 3.0)
+        self.declare_parameter("navigation_stale_arrival_seconds", 3.0)
+        self.declare_parameter("navigation_max_seconds_before_assume_arrival", 12.0)
+        self.declare_parameter("post_home_ir_check_count", 6)
+        self.declare_parameter("post_home_ir_check_interval_seconds", 0.5)
         self.declare_parameter(
             "class_to_bin",
             '{"biodegradable":1,"cardboard":0,"glass":2,"metal":0,"paper":0,"plastic":0,"other":2,"0":1,"1":0,"2":2,"3":0,"4":0,"5":0}',
@@ -35,6 +41,7 @@ class TrashOrchestrator(Node):
         self.create_subscription(String, "/trash_bin/capture_status", self._on_capture_status, 10)
         self.create_subscription(String, "/trash_bin/classification", self._on_classification, 10)
         self.create_subscription(String, "/esp32_actuator/status", self._on_status, 10)
+        self.create_subscription(String, "/trash_bin/actuator", self._on_actuator, 10)
         self.create_subscription(Int32MultiArray, "/trash_bin/levels", self._on_levels, 10)
 
         self._busy = False
@@ -42,9 +49,13 @@ class TrashOrchestrator(Node):
         self._capture_requested = False
         self._moving_due_to_full = False
         self._dump_trip_active = False
+        self._pending_home_object = False
         self._state = "idle"
         self._location = "home"
+        self._navigation_started_at = 0.0
+        self._last_actuator_telemetry_at = 0.0
         self._timers: List[Timer] = []
+        self.create_timer(0.5, self._navigation_watchdog)
         self._publish_state("idle")
 
     def _schedule(self, delay: float, callback: Callable[[], None]) -> None:
@@ -76,6 +87,10 @@ class TrashOrchestrator(Node):
     def _on_object(self, msg: Bool) -> None:
         if not msg.data:
             return
+        self.get_logger().info(
+            "object detected event received: "
+            f"state={self._state}, lid_open={self._lid_open}, busy={self._busy}"
+        )
         if self._lid_open or self._state in {"intake_open", "capturing", "sorting"}:
             self.get_logger().warn(
                 "ignored object detected while "
@@ -86,13 +101,21 @@ class TrashOrchestrator(Node):
         if self._moving_due_to_full or self._dump_trip_active:
             self.get_logger().warn(f"object detected while state={self._state}; stopping movement for intake")
             self._cmd("CMD:MOVE_STOP")
+            self._moving_due_to_full = False
+            self._dump_trip_active = False
+            self._pending_home_object = False
+            self._clear_navigation_watchdog()
 
+        self._start_intake_flow("object detected; starting intake flow")
+
+    def _start_intake_flow(self, log_message: str) -> None:
         self._busy = True
         self._moving_due_to_full = False
         self._dump_trip_active = False
+        self._pending_home_object = False
         self._lid_open = True
         self._capture_requested = False
-        self.get_logger().info("object detected; starting intake flow")
+        self.get_logger().info(log_message)
         self._publish_state("intake_open")
         self._cmd("CMD:LED:YELLOW")
         self._cmd("CMD:SERVO_OPEN")
@@ -100,28 +123,31 @@ class TrashOrchestrator(Node):
 
     def _on_go_dump_request(self, _: Empty) -> None:
         if self._busy or self._dump_trip_active:
-            return
-        if self._location == "dump":
-            self.get_logger().warn("ignored go-dump request while already at dump")
+            self.get_logger().warn(
+                "ignored go-dump request while "
+                f"busy={self._busy}, dump_trip_active={self._dump_trip_active}, state={self._state}"
+            )
             return
         self.get_logger().info("go-dump request received")
         self._busy = False
         self._location = "moving"
         self._moving_due_to_full = True
         self._dump_trip_active = True
+        self._start_navigation_watchdog()
         self._publish_state("dump_outbound")
         self._cmd("CMD:MOVE_START")
 
     def _on_go_home_request(self, _: Empty) -> None:
         if self._busy:
             return
-        if self._state not in {"dump_completed", "arrived", "line_lost", "home_completed"}:
+        if self._state not in {"idle", "dump_completed", "dump_outbound", "arrived", "line_lost", "home_completed"}:
             self.get_logger().warn(f"ignored go-home request while state={self._state}")
             return
         self.get_logger().info("go-home request received")
         self._location = "moving"
         self._moving_due_to_full = True
         self._dump_trip_active = True
+        self._start_navigation_watchdog()
         self._publish_state("dump_returning")
         self._cmd("CMD:MOVE_HOME")
 
@@ -132,6 +158,8 @@ class TrashOrchestrator(Node):
         self._capture_requested = False
         self._moving_due_to_full = False
         self._dump_trip_active = False
+        self._pending_home_object = False
+        self._clear_navigation_watchdog()
         for timer in list(self._timers):
             timer.cancel()
         self._timers.clear()
@@ -204,28 +232,149 @@ class TrashOrchestrator(Node):
 
     def _on_status(self, msg: String) -> None:
         status = msg.data.strip()
-        if status == "STATUS:SORT_DONE":
+        self.get_logger().info(f"actuator status received: {status}")
+        status_name = status.removeprefix("STATUS:").strip().upper()
+        if status_name.startswith("RX:"):
+            return
+        if status_name == "SORT_DONE":
             self._on_sort_done()
-        elif status == "STATUS:ARRIVED_DUMP":
-            self._location = "dump"
-            if self._dump_trip_active or self._moving_due_to_full:
-                self._publish_state("dump_completed")
+        elif status_name in {"MOVING_TO_DUMP", "RUN_FORWARD"}:
+            self._location = "moving"
+            self._moving_due_to_full = True
+            self._dump_trip_active = True
+            self._start_navigation_watchdog()
+            if self._state != "dump_outbound":
+                self._publish_state("dump_outbound")
+        elif status_name in {"MOVING_HOME", "RUN_HOME", "RETURN_FORWARD"}:
+            self._location = "moving"
+            self._moving_due_to_full = True
+            self._dump_trip_active = True
+            self._start_navigation_watchdog()
+            if self._state != "dump_returning":
+                self._publish_state("dump_returning")
+        elif status_name in {"ARRIVED_DUMP", "ARRIVED_END", "ENDPOINT_DUMP"}:
+            self._complete_dump_arrival("actuator status")
+        elif status_name in {"ARRIVED_HOME", "ARRIVED_START", "ENDPOINT_HOME"}:
+            self._complete_home_arrival("actuator status")
+        elif status_name == "ARRIVED":
+            self._moving_due_to_full = False
+            self._dump_trip_active = False
+            self._clear_navigation_watchdog()
+            if self._state == "dump_outbound":
+                self._complete_dump_arrival("generic actuator status")
+            elif self._state == "dump_returning":
+                self._complete_home_arrival("generic actuator status")
             else:
+                self._location = "home"
                 self._publish_state("arrived")
-        elif status == "STATUS:ARRIVED_HOME":
+        elif status_name in {"IDLE", "EMERGENCY_STOP"}:
+            if self._state == "dump_outbound":
+                self._complete_dump_arrival("idle actuator status")
+            elif self._state == "dump_returning":
+                self._complete_home_arrival("idle actuator status")
+        elif status_name == "LINE_LOST":
             self._moving_due_to_full = False
             self._dump_trip_active = False
-            self._location = "home"
-            self._publish_state("home_completed")
-        elif status == "STATUS:ARRIVED":
-            self._moving_due_to_full = False
-            self._dump_trip_active = False
-            self._location = "home"
-            self._publish_state("arrived")
-        elif status == "STATUS:LINE_LOST":
-            self._moving_due_to_full = False
-            self._dump_trip_active = False
+            self._clear_navigation_watchdog()
             self._publish_state("line_lost")
+
+    def _on_actuator(self, msg: String) -> None:
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._last_actuator_telemetry_at = time.monotonic()
+
+        if self._state not in {"dump_outbound", "dump_returning"}:
+            return
+
+        actuator_state = str(data.get("state", "")).upper()
+        moving = bool(data.get("moving", True))
+        if actuator_state != "IDLE" or moving:
+            return
+
+        if self._state == "dump_outbound":
+            self._complete_dump_arrival("actuator telemetry")
+        elif self._state == "dump_returning":
+            self._complete_home_arrival("actuator telemetry")
+
+    def _complete_dump_arrival(self, source: str) -> None:
+        was_dump_trip = self._dump_trip_active or self._moving_due_to_full or self._state == "dump_outbound"
+        self._moving_due_to_full = False
+        self._dump_trip_active = False
+        self._clear_navigation_watchdog()
+        self._location = "dump"
+        self.get_logger().info(f"dump arrival confirmed by {source}")
+        self._publish_state("dump_completed" if was_dump_trip else "arrived")
+
+    def _complete_home_arrival(self, source: str) -> None:
+        self._moving_due_to_full = False
+        self._dump_trip_active = False
+        self._clear_navigation_watchdog()
+        self._location = "home"
+        self.get_logger().info(f"home arrival confirmed by {source}")
+        self._publish_state("home_completed")
+        self._schedule_home_ir_checks()
+        if self._pending_home_object:
+            self._schedule(0.2, self._open_for_pending_home_object)
+
+    def _schedule_home_ir_checks(self) -> None:
+        count = max(0, int(self.get_parameter("post_home_ir_check_count").value))
+        interval = max(0.1, float(self.get_parameter("post_home_ir_check_interval_seconds").value))
+        for index in range(count):
+            self._schedule(0.1 + (index * interval), lambda: self._sensor_cmd("CMD:READ_IR"))
+
+    def _start_navigation_watchdog(self) -> None:
+        now = time.monotonic()
+        self._navigation_started_at = now
+        self._last_actuator_telemetry_at = now
+
+    def _clear_navigation_watchdog(self) -> None:
+        self._navigation_started_at = 0.0
+        self._last_actuator_telemetry_at = 0.0
+
+    def _navigation_watchdog(self) -> None:
+        if self._state not in {"dump_outbound", "dump_returning"} or not self._dump_trip_active:
+            return
+        if self._navigation_started_at <= 0.0 or self._last_actuator_telemetry_at <= 0.0:
+            return
+
+        now = time.monotonic()
+        min_seconds = float(self.get_parameter("navigation_min_seconds_before_stale_arrival").value)
+        stale_seconds = float(self.get_parameter("navigation_stale_arrival_seconds").value)
+        if now - self._navigation_started_at < min_seconds:
+            return
+        max_seconds = float(self.get_parameter("navigation_max_seconds_before_assume_arrival").value)
+        if max_seconds > 0.0 and now - self._navigation_started_at >= max_seconds:
+            self.get_logger().warn(
+                "navigation exceeded max time without arrival status; "
+                f"assuming arrival for state={self._state}"
+            )
+            if self._state == "dump_outbound":
+                self._complete_dump_arrival("navigation timeout")
+            else:
+                self._complete_home_arrival("navigation timeout")
+            return
+        if now - self._last_actuator_telemetry_at < stale_seconds:
+            return
+
+        self.get_logger().warn(
+            "actuator telemetry stopped while navigating; "
+            f"assuming arrival for state={self._state}"
+        )
+        if self._state == "dump_outbound":
+            self._complete_dump_arrival("stale actuator telemetry")
+        else:
+            self._complete_home_arrival("stale actuator telemetry")
+
+    def _open_for_pending_home_object(self) -> None:
+        if not self._pending_home_object:
+            return
+        if self._busy or self._lid_open or self._location != "home":
+            return
+        if self._state not in {"home_completed", "arrived", "idle"}:
+            return
+        self._start_intake_flow("opening lid for object detected during home return")
 
     def _on_sort_done(self) -> None:
         if self._state != "sorting":
@@ -265,6 +414,7 @@ class TrashOrchestrator(Node):
             self._location = "moving"
             self._moving_due_to_full = True
             self._dump_trip_active = True
+            self._start_navigation_watchdog()
             self._publish_state("bin_full")
             self._cmd(str(self.get_parameter("full_bin_move_command").value))
 

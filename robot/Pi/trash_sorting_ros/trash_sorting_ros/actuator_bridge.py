@@ -23,6 +23,7 @@ class ActuatorBridge(Node):
         self.status_pub = self.create_publisher(String, "/esp32_actuator/status", 10)
         self.telemetry_pub = self.create_publisher(String, "/trash_bin/actuator", 10)
         self.cmd_sub = self.create_subscription(String, "/esp32_actuator/cmd", self._on_command, 10)
+        self._last_telemetry_summary = None
 
         self.worker = SerialWorker(
             port=str(self.get_parameter("port").value),
@@ -55,6 +56,7 @@ class ActuatorBridge(Node):
     def _on_line(self, line: str) -> None:
         self.raw_pub.publish(String(data=line))
         if line.startswith("STATUS:"):
+            self.get_logger().info(f"rx actuator status: {line}")
             self.status_pub.publish(String(data=line))
         elif line.startswith("ACT:"):
             try:
@@ -62,6 +64,13 @@ class ActuatorBridge(Node):
             except Exception as exc:
                 self.get_logger().warn(f"cannot parse actuator line {line!r}: {exc}")
                 return
+            summary = (data.get("state"), data.get("moving"))
+            if summary != self._last_telemetry_summary:
+                self._last_telemetry_summary = summary
+                self.get_logger().info(
+                    "rx actuator telemetry: "
+                    f"state={data.get('state')}, moving={data.get('moving')}, active={data.get('line_active_count')}"
+                )
             self.telemetry_pub.publish(String(data=json_dumps(data)))
 
 

@@ -41,9 +41,9 @@ static const int LINE_READ_ORDER[5] = {4, 3, 2, 1, 0};
 static const int LINE_WEIGHTS[5] = {-2000, -1000, 0, 1000, 2000};
 static const int DRIVE_DIRECTION = 1;
 
-static const int LED_RED = 4;
-static const int LED_GREEN = 2;
-static const int LED_YELLOW = 27;
+static const int LED_RED = 18;    // LED1
+static const int LED_GREEN = 17;  // LED2 / TX2
+static const int LED_YELLOW = 16; // LED3 / RX2
 
 static const uint32_t PI_BAUD = 115200;
 
@@ -70,8 +70,9 @@ static const int SERVO3_COMMAND_HOLD_PULSES = 12;
 static const unsigned long SELECT_SETTLE_MS = 700;
 static const unsigned long DROP_HOLD_MS = 700;
 static const unsigned long DROP_RETURN_MS = 400;
-static const int START_CLEAR_SPEED = 225;
+static const int START_CLEAR_SPEED = 150;
 static const int ENDPOINT_MIN_ACTIVE = 4;
+static const int START_MARKER_MIN_ACTIVE = 4;
 static const unsigned long START_IGNORE_MS = 1000;
 static const unsigned long LOST_BRIDGE_MS = 120;
 static const unsigned long EDGE_PULL_MEMORY_MS = 900;
@@ -124,6 +125,7 @@ unsigned long lastMovingTelemetryMs = 0;
 unsigned long lineLostSinceMs = 0;
 unsigned long navigationStartMs = 0;
 bool endpointArmed = true;
+bool startMarkerSeen = false;
 long lastSeenPosition = 0;
 int lastSearchDir = 1;
 int lastEdgeDir = 0;
@@ -424,6 +426,7 @@ void startLineFollow(bool returningHome) {
   lastMovingTelemetryMs = 0;
   navigationStartMs = millis();
   endpointArmed = false;
+  startMarkerSeen = false;
   pidIntegral = 0.0f;
   pidLastError = 0.0f;
   lastPidUs = micros();
@@ -437,6 +440,8 @@ void startLineFollow(bool returningHome) {
 }
 
 void stopMovement(const char *statusLine) {
+  PI_SERIAL.println(statusLine);
+  PI_SERIAL.flush();
   brakeMotors();
   moving = false;
   currentState = STATE_IDLE;
@@ -446,6 +451,7 @@ void stopMovement(const char *statusLine) {
   lineLostSinceMs = 0;
   allLedsOff();
   PI_SERIAL.println(statusLine);
+  PI_SERIAL.flush();
   sendTelemetry();
 }
 
@@ -503,14 +509,28 @@ void followLinePid(const LineRead &line) {
 }
 
 bool clearStartMarker(const LineRead &line) {
-  unsigned long elapsedMs = millis() - navigationStartMs;
-  if (elapsedMs >= START_IGNORE_MS || line.activeCount < ENDPOINT_MIN_ACTIVE) {
-    endpointArmed = true;
+  if (endpointArmed) {
     return false;
   }
 
-  driveStraight(START_CLEAR_SPEED);
-  return true;
+  unsigned long elapsedMs = millis() - navigationStartMs;
+  if (line.activeCount >= START_MARKER_MIN_ACTIVE) {
+    startMarkerSeen = true;
+  }
+
+  if (startMarkerSeen && line.activeCount >= START_MARKER_MIN_ACTIVE) {
+    driveStraight(START_CLEAR_SPEED);
+    return true;
+  }
+
+  if (startMarkerSeen || elapsedMs >= START_IGNORE_MS) {
+    endpointArmed = true;
+    PI_SERIAL.println("STATUS:START_CLEARED");
+    PI_SERIAL.flush();
+    return false;
+  }
+
+  return false;
 }
 
 bool stopAtEndpoint(const LineRead &line) {
@@ -518,6 +538,8 @@ bool stopAtEndpoint(const LineRead &line) {
   if (elapsedMs < START_IGNORE_MS || !endpointArmed || !isEndpointMarker(line)) {
     return false;
   }
+  PI_SERIAL.println(currentState == STATE_MOVING_HOME ? "STATUS:ENDPOINT_HOME" : "STATUS:ENDPOINT_DUMP");
+  PI_SERIAL.flush();
   stopMovement(currentState == STATE_MOVING_HOME ? "STATUS:ARRIVED_HOME" : "STATUS:ARRIVED_DUMP");
   return true;
 }
@@ -640,6 +662,10 @@ void driveEdgePull(int edgeDir) {
 }
 
 void stopLostLine() {
+  if (!lineLostReported) {
+    PI_SERIAL.println("STATUS:LINE_LOST");
+    PI_SERIAL.flush();
+  }
   brakeMotors();
   moving = false;
   currentState = STATE_LINE_LOST;
@@ -648,8 +674,9 @@ void stopLostLine() {
   pidLastError = 0.0f;
   lineLostSinceMs = 0;
   if (!lineLostReported) {
-    PI_SERIAL.println("STATUS:LINE_LOST");
     lineLostReported = true;
+    PI_SERIAL.println("STATUS:LINE_LOST");
+    PI_SERIAL.flush();
     sendTelemetry();
   }
 }
