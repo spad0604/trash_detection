@@ -117,7 +117,7 @@ class TrashOrchestrator(Node):
         self._capture_requested = False
         self.get_logger().info(log_message)
         self._publish_state("intake_open")
-        self._cmd("CMD:LED:YELLOW")
+        self._cmd("CMD:LED:OFF")
         self._cmd("CMD:SERVO_OPEN")
         self._schedule(float(self.get_parameter("capture_delay_seconds").value), self._request_classification)
 
@@ -172,7 +172,6 @@ class TrashOrchestrator(Node):
             return
         self._capture_requested = True
         self._publish_state("capturing")
-        self._cmd("CMD:LED:RED")
         self.classify_request_pub.publish(Empty())
         self._schedule(float(self.get_parameter("capture_timeout_seconds").value), self._capture_timeout)
 
@@ -252,9 +251,9 @@ class TrashOrchestrator(Node):
             self._start_navigation_watchdog()
             if self._state != "dump_returning":
                 self._publish_state("dump_returning")
-        elif status_name in {"ARRIVED_DUMP", "ARRIVED_END", "ENDPOINT_DUMP"}:
+        elif status_name in {"ARRIVED_DUMP", "ARRIVED_END", "ENDPOINT_DUMP", "START"}:
             self._complete_dump_arrival("actuator status")
-        elif status_name in {"ARRIVED_HOME", "ARRIVED_START", "ENDPOINT_HOME"}:
+        elif status_name in {"ARRIVED_HOME", "ARRIVED_START", "ENDPOINT_HOME", "HOME"}:
             self._complete_home_arrival("actuator status")
         elif status_name == "ARRIVED":
             self._moving_due_to_full = False
@@ -299,6 +298,8 @@ class TrashOrchestrator(Node):
             self._complete_home_arrival("actuator telemetry")
 
     def _complete_dump_arrival(self, source: str) -> None:
+        if self._location == "dump" and self._state == "dump_completed":
+            return
         was_dump_trip = self._dump_trip_active or self._moving_due_to_full or self._state == "dump_outbound"
         self._moving_due_to_full = False
         self._dump_trip_active = False
@@ -308,6 +309,8 @@ class TrashOrchestrator(Node):
         self._publish_state("dump_completed" if was_dump_trip else "arrived")
 
     def _complete_home_arrival(self, source: str) -> None:
+        if self._location == "home" and self._state == "home_completed":
+            return
         self._moving_due_to_full = False
         self._dump_trip_active = False
         self._clear_navigation_watchdog()
@@ -381,7 +384,6 @@ class TrashOrchestrator(Node):
             return
         self._capture_requested = False
         self._publish_state("updating_levels")
-        self._cmd("CMD:LED:GREEN")
         self._sensor_cmd("CMD:READ_LEVELS")
         self._schedule(float(self.get_parameter("led_on_seconds").value), lambda: self._cmd("CMD:LED:OFF"))
         self._schedule(1.0, self._finish_cycle_if_not_full)

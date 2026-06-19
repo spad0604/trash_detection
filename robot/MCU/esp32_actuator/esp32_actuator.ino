@@ -5,14 +5,15 @@
  *   CMD:CLASSIFY:<0|1|2>  -> servo 1 selects bin, servo 2 drops trash
  *   CMD:SERVO_OPEN        -> servo 3 to 180 deg
  *   CMD:SERVO_CLOSE       -> servo 3 back to 0 deg
- *   CMD:MOVE_START        -> run forward on the circular line to the dump marker
- *   CMD:MOVE_HOME         -> continue forward on the circular line to the home marker
+ *   CMD:MOVE_START        -> run forward on the circular line to the next marker
+ *   CMD:MOVE_HOME         -> run forward on the circular line to the next marker
  *   CMD:MOVE_STOP         -> stop motors
  *   CMD:STATUS            -> send status + one telemetry snapshot now
  *   CMD:LED:<RED|GREEN|YELLOW|OFF>
  *
  * ESP32 -> Pi:
  *   STATUS:<...>
+ *   STATUS:HOME|START     -> ESP32-decided route position, starting at HOME
  *   ACT:<state>,<moving>,<bin>,<line_pos>,<active>,<raw1>..<raw5>,<str1>..<str5>
  */
 
@@ -44,6 +45,7 @@ static const int DRIVE_DIRECTION = 1;
 static const int LED_RED = 18;    // LED1
 static const int LED_GREEN = 17;  // LED2 / TX2
 static const int LED_YELLOW = 16; // LED3 / RX2
+static const int BIN_LED_PINS[3] = {LED_RED, LED_GREEN, LED_YELLOW};
 
 static const uint32_t PI_BAUD = 115200;
 
@@ -119,6 +121,7 @@ int servo2Angle = SERVO2_HOME_ANGLE;
 int servo3Angle = SERVO3_HOME_ANGLE;
 bool moving = false;
 bool lineLostReported = false;
+int routePositionStep = 0;
 
 unsigned long lastPidUs = 0;
 unsigned long lastMovingTelemetryMs = 0;
@@ -160,6 +163,9 @@ void openLid();
 void closeLid();
 void startLineFollow(bool returningHome);
 void stopMovement(const char *statusLine);
+bool routePositionIsHome();
+bool nextRoutePositionIsHome();
+void sendRoutePositionStatus();
 LineRead readLineSensors();
 int normalizedLineStrength(int sensorIndex, int rawValue);
 void followLinePid(const LineRead &line);
@@ -316,6 +322,7 @@ void setup() {
   allLedsOff();
 
   PI_SERIAL.println("[ESP32 Actuator] Ready");
+  sendRoutePositionStatus();
   PI_SERIAL.println("STATUS:IDLE");
 }
 
@@ -381,7 +388,6 @@ void sortToBin(int targetBin) {
   currentBin = targetBin;
   lineLostReported = false;
   allLedsOff();
-  digitalWrite(LED_YELLOW, HIGH);
 
   char status[32];
   snprintf(status, sizeof(status), "STATUS:SORTING:%d", targetBin);
@@ -399,7 +405,7 @@ void sortToBin(int targetBin) {
   holdServosForMs(SELECT_SETTLE_MS);
 
   allLedsOff();
-  digitalWrite(LED_GREEN, HIGH);
+  digitalWrite(BIN_LED_PINS[targetBin], HIGH);
   currentState = STATE_IDLE;
   PI_SERIAL.println("STATUS:SORT_DONE");
   sendTelemetry();
@@ -419,7 +425,9 @@ void closeLid() {
 
 void startLineFollow(bool returningHome) {
   stopMotors();
-  currentState = returningHome ? STATE_MOVING_HOME : STATE_MOVING;
+  (void)returningHome;
+  bool goingHome = nextRoutePositionIsHome();
+  currentState = goingHome ? STATE_MOVING_HOME : STATE_MOVING;
   moving = true;
   lineLostReported = false;
   lineLostSinceMs = 0;
@@ -434,8 +442,7 @@ void startLineFollow(bool returningHome) {
   lastEdgeDir = 0;
   lastEdgeSeenMs = 0;
   allLedsOff();
-  digitalWrite(LED_YELLOW, HIGH);
-  PI_SERIAL.println(returningHome ? "STATUS:MOVING_HOME" : "STATUS:MOVING_TO_DUMP");
+  PI_SERIAL.println(goingHome ? "STATUS:MOVING_HOME" : "STATUS:MOVING_TO_DUMP");
   sendTelemetry();
 }
 
@@ -538,10 +545,25 @@ bool stopAtEndpoint(const LineRead &line) {
   if (elapsedMs < START_IGNORE_MS || !endpointArmed || !isEndpointMarker(line)) {
     return false;
   }
-  PI_SERIAL.println(currentState == STATE_MOVING_HOME ? "STATUS:ENDPOINT_HOME" : "STATUS:ENDPOINT_DUMP");
+  routePositionStep++;
+  bool atHome = routePositionIsHome();
+  sendRoutePositionStatus();
+  PI_SERIAL.println(atHome ? "STATUS:ENDPOINT_HOME" : "STATUS:ENDPOINT_DUMP");
   PI_SERIAL.flush();
-  stopMovement(currentState == STATE_MOVING_HOME ? "STATUS:ARRIVED_HOME" : "STATUS:ARRIVED_DUMP");
+  stopMovement(atHome ? "STATUS:ARRIVED_HOME" : "STATUS:ARRIVED_DUMP");
   return true;
+}
+
+bool routePositionIsHome() {
+  return (routePositionStep % 2) == 0;
+}
+
+bool nextRoutePositionIsHome() {
+  return ((routePositionStep + 1) % 2) == 0;
+}
+
+void sendRoutePositionStatus() {
+  PI_SERIAL.println(routePositionIsHome() ? "STATUS:HOME" : "STATUS:START");
 }
 
 bool hasContiguousActiveBlock(const LineRead &line) {
